@@ -1,4 +1,6 @@
-# erupt-example
+# myFistProjectAI
+
+## erupt-example
 
 基于 **Spring Boot 4.1.1**（当前最新 GA）+ **MyBatis 4.1.0** + **MySQL 8+** 的标准分层后端工程。
 
