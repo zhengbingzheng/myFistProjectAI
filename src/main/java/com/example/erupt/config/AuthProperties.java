@@ -1,0 +1,172 @@
+package com.example.erupt.config;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.stereotype.Component;
+
+import java.time.Duration;
+
+/**
+ * 认证与安全策略配置（绑定 {@code app.auth}）。
+ *
+ * <p>所有字段都支持环境变量覆盖，便于在不同环境使用不同的强度策略，
+ * 同时避免把密钥明文写进配置文件。</p>
+ *
+ * <p><b>密钥说明</b>：{@code token-secret} 默认值仅用于本地开发。
+ * 生产环境必须通过 {@code AUTH_TOKEN_SECRET} 注入足够随机的值，
+ * 否则任何人都能伪造出合法 Token。</p>
+ */
+@Component
+@ConfigurationProperties(prefix = "app.auth")
+public class AuthProperties {
+
+    /** 登录态前缀，用于 Redis key 命名空间 */
+    private String tokenPrefix = "auth:token:";
+
+    /**
+     * Token 签名密钥（HMAC-SHA256）。
+     * 生产环境务必用环境变量注入：{@code AUTH_TOKEN_SECRET}
+     */
+    private String tokenSecret = "erupt-example-dev-secret-change-me-in-production";
+
+    /** Token 有效期 */
+    private Duration tokenTtl = Duration.ofHours(2);
+
+    /** 登录失败计数 key 前缀 */
+    private String loginFailPrefix = "auth:login:fail:";
+
+    /** 账号被锁定 key 前缀 */
+    private String loginLockPrefix = "auth:login:lock:";
+
+    /** 允许的最大连续失败次数，超过即锁定 */
+    private int loginMaxFailures = 5;
+
+    /** 连续失败计数的存活窗口（也是锁定时长） */
+    private Duration loginFailWindow = Duration.ofMinutes(15);
+
+    /** 验证码 key 前缀 */
+    private String captchaPrefix = "auth:captcha:";
+
+    /** 验证码有效期 */
+    private Duration captchaTtl = Duration.ofMinutes(2);
+
+    /**
+     * 是否强制验证码。
+     * 默认关闭：连续失败触发后才要求验证码，做到"正常用户无感、攻击者受限"。
+     */
+    private boolean captchaRequired = false;
+
+    /** 是否开启鉴权拦截（关闭后所有接口放行，便于本地联调） */
+    private boolean enabled = true;
+
+    /**
+     * 需要鉴权但允许匿名访问的路径前缀（登录、验证码等）。
+     *
+     * <p>注意 AuthInterceptor#isPermit 用的是 <b>startsWith 前缀匹配</b>，务必显式列全：
+     * 过去这里写的是 {@code /api/auth/verify}（一个并不存在的端点），
+     * 而真正需要放行的 {@code /api/auth/login-hint} 没列进去，
+     * 仅仅因为 {@code /api/auth/login} 前缀恰好能匹配到它才没出问题——
+     * 一旦将来把登录端点改名（如 /api/auth/signin），login-hint 就会被静默拦截，
+     * 表现为"登录失败后查不到验证码状态"。列出全部匿名端点，不依赖这种巧合。</p>
+     */
+    private String[] permitPaths = {
+            "/api/auth/login",
+            "/api/auth/login-hint",
+            "/api/auth/captcha"
+    };
+
+    public String getTokenPrefix() {
+        return tokenPrefix;
+    }
+
+    public void setTokenPrefix(String tokenPrefix) {
+        this.tokenPrefix = tokenPrefix;
+    }
+
+    public String getTokenSecret() {
+        return tokenSecret;
+    }
+
+    public void setTokenSecret(String tokenSecret) {
+        this.tokenSecret = tokenSecret;
+    }
+
+    public Duration getTokenTtl() {
+        return tokenTtl;
+    }
+
+    public void setTokenTtl(Duration tokenTtl) {
+        this.tokenTtl = tokenTtl;
+    }
+
+    public String getLoginFailPrefix() {
+        return loginFailPrefix;
+    }
+
+    public void setLoginFailPrefix(String loginFailPrefix) {
+        this.loginFailPrefix = loginFailPrefix;
+    }
+
+    public String getLoginLockPrefix() {
+        return loginLockPrefix;
+    }
+
+    public void setLoginLockPrefix(String loginLockPrefix) {
+        this.loginLockPrefix = loginLockPrefix;
+    }
+
+    public int getLoginMaxFailures() {
+        return loginMaxFailures;
+    }
+
+    public void setLoginMaxFailures(int loginMaxFailures) {
+        this.loginMaxFailures = loginMaxFailures;
+    }
+
+    public Duration getLoginFailWindow() {
+        return loginFailWindow;
+    }
+
+    public void setLoginFailWindow(Duration loginFailWindow) {
+        this.loginFailWindow = loginFailWindow;
+    }
+
+    public String getCaptchaPrefix() {
+        return captchaPrefix;
+    }
+
+    public void setCaptchaPrefix(String captchaPrefix) {
+        this.captchaPrefix = captchaPrefix;
+    }
+
+    public Duration getCaptchaTtl() {
+        return captchaTtl;
+    }
+
+    public void setCaptchaTtl(Duration captchaTtl) {
+        this.captchaTtl = captchaTtl;
+    }
+
+    public boolean isCaptchaRequired() {
+        return captchaRequired;
+    }
+
+    public void setCaptchaRequired(boolean captchaRequired) {
+        this.captchaRequired = captchaRequired;
+    }
+
+    public boolean isEnabled() {
+        return enabled;
+    }
+
+    public void setEnabled(boolean enabled) {
+        this.enabled = enabled;
+    }
+
+    public String[] getPermitPaths() {
+        return permitPaths;
+    }
+
+    public void setPermitPaths(String[] permitPaths) {
+        this.permitPaths = permitPaths;
+    }
+}

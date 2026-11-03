@@ -1,0 +1,230 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.erupt.repository.mapper.MenuMapper">
+
+    <!-- ==================== 菜单 ==================== -->
+
+    <sql id="Menu_Columns">
+        m.id, m.parent_id AS parentId, m.menu_name AS menuName, m.menu_code AS menuCode,
+        m.menu_type AS menuType, m.path, m.component, m.icon, m.sort_num AS sortNum,
+        m.visible, m.permission, m.remark, m.del_flag AS delFlag,
+        m.create_by AS createBy, m.update_by AS updateBy,
+        m.create_time AS createTime, m.update_time AS updateTime
+    </sql>
+
+    <insert id="insertMenu">
+        INSERT INTO t_menu
+            (id, parent_id, menu_name, menu_code, menu_type, path, component, icon,
+             sort_num, visible, permission, remark, del_flag, create_by, create_time, update_time)
+        VALUES
+            (#{id}, #{parentId}, #{menuName}, #{menuCode}, #{menuType}, #{path}, #{component}, #{icon},
+             #{sortNum}, #{visible}, #{permission}, #{remark}, '0', #{createBy}, NOW(), NOW())
+    </insert>
+
+    <update id="updateMenu">
+        UPDATE t_menu
+        <set>
+            <if test="parentId != null">parent_id = #{parentId},</if>
+            <if test="menuName != null">menu_name = #{menuName},</if>
+            <if test="menuCode != null">menu_code = #{menuCode},</if>
+            <if test="menuType != null">menu_type = #{menuType},</if>
+            <if test="path != null">path = #{path},</if>
+            <if test="component != null">component = #{component},</if>
+            <if test="icon != null">icon = #{icon},</if>
+            <if test="sortNum != null">sort_num = #{sortNum},</if>
+            <if test="visible != null">visible = #{visible},</if>
+            <if test="permission != null">permission = #{permission},</if>
+            <if test="remark != null">remark = #{remark},</if>
+        </set>
+        WHERE id = #{id} AND del_flag = '0'
+    </update>
+
+    <select id="selectMenuById" resultType="com.example.erupt.repository.entity.Menu">
+        SELECT
+        <include refid="Menu_Columns"/>
+        FROM t_menu m
+        WHERE m.id = #{id} AND m.del_flag = '0'
+        LIMIT 1
+    </select>
+
+    <select id="selectMenuByCode" resultType="com.example.erupt.repository.entity.Menu">
+        SELECT
+        <include refid="Menu_Columns"/>
+        FROM t_menu m
+        WHERE m.menu_code = #{menuCode} AND m.del_flag = '0'
+        LIMIT 1
+    </select>
+
+    <select id="selectAllMenus" resultType="com.example.erupt.repository.entity.Menu">
+        SELECT
+        <include refid="Menu_Columns"/>
+        FROM t_menu m
+        WHERE m.del_flag = '0'
+        ORDER BY m.parent_id, m.sort_num, m.create_time
+    </select>
+
+    <select id="countChildren" resultType="int">
+        SELECT COUNT(*)
+        FROM t_menu
+        WHERE parent_id = #{parentId} AND del_flag = '0'
+    </select>
+
+    <!-- ==================== 角色 ==================== -->
+
+    <sql id="Role_Columns">
+        r.id, r.role_code AS roleCode, r.role_name AS roleName, r.role_level AS roleLevel,
+        r.description, r.del_flag AS delFlag,
+        r.create_by AS createBy, r.update_by AS updateBy,
+        r.create_time AS createTime, r.update_time AS updateTime
+    </sql>
+
+    <insert id="insertRole">
+        INSERT INTO t_role
+            (id, role_code, role_name, role_level, description, del_flag, create_by, create_time, update_time)
+        VALUES
+            (#{id}, #{roleCode}, #{roleName}, #{roleLevel}, #{description}, '0', #{createBy}, NOW(), NOW())
+    </insert>
+
+    <update id="updateRole">
+        UPDATE t_role
+        <set>
+            <if test="roleName != null">role_name = #{roleName},</if>
+            <if test="roleLevel != null">role_level = #{roleLevel},</if>
+            <if test="description != null">description = #{description},</if>
+        </set>
+        WHERE id = #{id} AND del_flag = '0'
+    </update>
+
+    <select id="selectRoleById" resultType="com.example.erupt.repository.entity.Role">
+        SELECT
+        <include refid="Role_Columns"/>
+        FROM t_role r
+        WHERE r.id = #{id} AND r.del_flag = '0'
+        LIMIT 1
+    </select>
+
+    <select id="selectRoleByCode" resultType="com.example.erupt.repository.entity.Role">
+        SELECT
+        <include refid="Role_Columns"/>
+        FROM t_role r
+        WHERE r.role_code = #{roleCode} AND r.del_flag = '0'
+        LIMIT 1
+    </select>
+
+    <select id="selectAllRoles" resultType="com.example.erupt.repository.entity.Role">
+        SELECT
+        <include refid="Role_Columns"/>
+        FROM t_role r
+        WHERE r.del_flag = '0'
+        ORDER BY r.role_level, r.create_time
+    </select>
+
+    <!-- ==================== 用户-角色 ==================== -->
+
+    <insert id="insertUserRole">
+        INSERT INTO t_user_role (id, user_id, role_id, del_flag, create_by, create_time, update_time)
+        VALUES (#{id}, #{userId}, #{roleId}, '0', #{createBy}, NOW(), NOW())
+    </insert>
+
+    <select id="selectRoleIdsByUserId" resultType="java.lang.String">
+        SELECT role_id
+        FROM t_user_role
+        WHERE user_id = #{userId} AND del_flag = '0'
+    </select>
+
+    <delete id="deleteUserRolesByUserId">
+        DELETE FROM t_user_role
+        WHERE user_id = #{userId}
+    </delete>
+
+    <select id="selectRolesByUserId" resultType="com.example.erupt.repository.entity.Role">
+        SELECT
+        <include refid="Role_Columns"/>
+        FROM t_user_role ur
+                 JOIN t_role r ON r.id = ur.role_id AND r.del_flag = '0'
+        WHERE ur.user_id = #{userId}
+          AND ur.del_flag = '0'
+        ORDER BY r.role_level
+    </select>
+
+    <!-- ==================== 角色-菜单 ==================== -->
+
+    <insert id="insertRoleMenu">
+        INSERT INTO t_role_menu (id, role_id, menu_id, create_by, create_time)
+        VALUES (#{id}, #{roleId}, #{menuId}, #{createBy}, NOW())
+    </insert>
+
+    <select id="selectMenuIdsByRoleId" resultType="java.lang.String">
+        SELECT menu_id
+        FROM t_role_menu
+        WHERE role_id = #{roleId}
+    </select>
+
+    <delete id="deleteRoleMenusByRoleId">
+        DELETE FROM t_role_menu
+        WHERE role_id = #{roleId}
+    </delete>
+
+    <delete id="deleteRoleMenusByMenuId">
+        DELETE FROM t_role_menu
+        WHERE menu_id = #{menuId}
+    </delete>
+
+    <!--
+      用户可见菜单：三级联查 user_role → role_menu → menu。
+      DISTINCT 是必须的——一个用户若同时有多个角色且菜单重叠，不去重会出现重复菜单。
+    -->
+    <select id="selectMenusByUserId" resultType="com.example.erupt.repository.entity.Menu">
+        SELECT DISTINCT
+        <include refid="Menu_Columns"/>
+        FROM t_user_role ur
+                 JOIN t_role r ON r.id = ur.role_id AND r.del_flag = '0'
+                 JOIN t_role_menu rm ON rm.role_id = r.id
+                 JOIN t_menu m ON m.id = rm.menu_id AND m.del_flag = '0'
+        WHERE ur.user_id = #{userId}
+          AND ur.del_flag = '0'
+        ORDER BY m.parent_id, m.sort_num, m.create_time
+    </select>
+
+    <!--
+      路径级鉴权：只要有一行命中就说明该路径在授权范围内。
+      注意这里用 COUNT 而不是查全量再在内存比——每次接口请求都会走到，
+      必须是一次带索引的小查询。
+    -->
+    <select id="countMenuPathForUser" resultType="int">
+        SELECT COUNT(*)
+        FROM t_user_role ur
+                 JOIN t_role r ON r.id = ur.role_id AND r.del_flag = '0'
+                 JOIN t_role_menu rm ON rm.role_id = r.id
+                 JOIN t_menu m ON m.id = rm.menu_id AND m.del_flag = '0'
+        WHERE ur.user_id = #{userId}
+          AND ur.del_flag = '0'
+          AND m.path = #{path}
+    </select>
+
+    <!--
+      权限标识校验：菜单的 permission 字段（如 knowledge）与 API 模块名对应。
+      未配置 permission 的菜单不参与接口鉴权，因此初始化数据时务必给业务菜单配上，
+      否则该模块对所有登录用户都是开放的。
+    -->
+    <select id="countPermissionForUser" resultType="int">
+        SELECT COUNT(*)
+        FROM t_user_role ur
+                 JOIN t_role r ON r.id = ur.role_id AND r.del_flag = '0'
+                 JOIN t_role_menu rm ON rm.role_id = r.id
+                 JOIN t_menu m ON m.id = rm.menu_id AND m.del_flag = '0'
+        WHERE ur.user_id = #{userId}
+          AND ur.del_flag = '0'
+          AND m.permission = #{permission}
+    </select>
+
+    <select id="selectUserMaxLevel" resultType="java.lang.Integer">
+        SELECT MIN(r.role_level)
+        FROM t_user_role ur
+                 JOIN t_role r ON r.id = ur.role_id AND r.del_flag = '0'
+        WHERE ur.user_id = #{userId}
+          AND ur.del_flag = '0'
+    </select>
+
+</mapper>
