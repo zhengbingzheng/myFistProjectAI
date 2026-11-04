@@ -92,6 +92,7 @@
             <if test="roleName != null">role_name = #{roleName},</if>
             <if test="roleLevel != null">role_level = #{roleLevel},</if>
             <if test="description != null">description = #{description},</if>
+            <if test="updateBy != null">update_by = #{updateBy},</if>
         </set>
         WHERE id = #{id} AND del_flag = '0'
     </update>
@@ -122,20 +123,23 @@
 
     <!-- ==================== 用户-角色 ==================== -->
 
-    <insert id="insertUserRole">
+    <!-- 批量写入：授权是"先清空再全量重建"，一次 foreach 拼接比逐行 insert 少 N 次往返 -->
+    <insert id="insertUserRoles">
         INSERT INTO t_user_role (id, user_id, role_id, del_flag, create_by, create_time, update_time)
-        VALUES (#{id}, #{userId}, #{roleId}, '0', #{createBy}, NOW(), NOW())
+        VALUES
+        <foreach collection="list" item="item" separator=",">
+            (#{item.id}, #{item.userId}, #{item.roleId}, '0', #{item.createBy}, NOW(), NOW())
+        </foreach>
     </insert>
-
-    <select id="selectRoleIdsByUserId" resultType="java.lang.String">
-        SELECT role_id
-        FROM t_user_role
-        WHERE user_id = #{userId} AND del_flag = '0'
-    </select>
 
     <delete id="deleteUserRolesByUserId">
         DELETE FROM t_user_role
         WHERE user_id = #{userId}
+    </delete>
+
+    <delete id="deleteUserRolesByRoleId">
+        DELETE FROM t_user_role
+        WHERE role_id = #{roleId}
     </delete>
 
     <select id="selectRolesByUserId" resultType="com.example.erupt.repository.entity.Role">
@@ -150,10 +154,18 @@
 
     <!-- ==================== 角色-菜单 ==================== -->
 
-    <insert id="insertRoleMenu">
+    <insert id="insertRoleMenus">
         INSERT INTO t_role_menu (id, role_id, menu_id, create_by, create_time)
-        VALUES (#{id}, #{roleId}, #{menuId}, #{createBy}, NOW())
+        VALUES
+        <foreach collection="list" item="item" separator=",">
+            (#{item.id}, #{item.roleId}, #{item.menuId}, #{item.createBy}, NOW())
+        </foreach>
     </insert>
+
+    <select id="selectAllRoleMenus" resultType="com.example.erupt.repository.entity.RoleMenu">
+        SELECT id, role_id AS roleId, menu_id AS menuId, create_by AS createBy, create_time AS createTime
+        FROM t_role_menu
+    </select>
 
     <select id="selectMenuIdsByRoleId" resultType="java.lang.String">
         SELECT menu_id
@@ -219,7 +231,11 @@
           AND m.permission = #{permission}
     </select>
 
-    <select id="selectUserMaxLevel" resultType="java.lang.Integer">
+    <!--
+      角色等级数字越小权限越高，MIN 才是"最高权限等级"。
+      无任何角色时返回 null，由服务层折算成不可用等级。
+    -->
+    <select id="selectUserMinRoleLevel" resultType="java.lang.Integer">
         SELECT MIN(r.role_level)
         FROM t_user_role ur
                  JOIN t_role r ON r.id = ur.role_id AND r.del_flag = '0'

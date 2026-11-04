@@ -24,6 +24,14 @@ public interface ChatMapper {
 
     ChatConversation selectConversationByBizKey(@Param("bizKey") String bizKey);
 
+    /**
+     * 同上，但加 FOR UPDATE 走「当前读」。
+     * 并发建会话的兜底场景必须用它：普通 SELECT 在 REPEATABLE READ 下
+     * 沿用事务内早已建立的读视图，看不到对手方刚提交的会话行，
+     * 兜底会永远落空并把竞态变成一句对不上病因的 409。
+     */
+    ChatConversation selectConversationByBizKeyForUpdate(@Param("bizKey") String bizKey);
+
     ChatConversation selectConversationById(@Param("id") String id);
 
     int updateConversationLastMsg(@Param("id") String id,
@@ -49,10 +57,15 @@ public interface ChatMapper {
     int incrMemberUnread(@Param("conversationId") String conversationId,
                          @Param("userId") String userId);
 
-    /** 清空未读并推进已读位点 */
+    /**
+     * 按本次标记已读的行数扣减未读计数。
+     * 不能无条件清零：markRead 等行锁期间若恰好收到新消息（+1 已提交），
+     * 清零会把那条新消息的未读一并抹掉——红点消失但消息列表里确实有未读。
+     * 也不动 last_read_msg_id：当前没有消费方，覆盖成 NULL 只会破坏字段语义。
+     */
     int clearMemberUnread(@Param("conversationId") String conversationId,
                           @Param("userId") String userId,
-                          @Param("lastReadMsgId") String lastReadMsgId);
+                          @Param("readCount") int readCount);
 
     /** 该用户所有会话的未读总数，用于全局角标 */
     int sumUnreadByUser(@Param("userId") String userId);
@@ -81,10 +94,12 @@ public interface ChatMapper {
      */
     List<java.util.Map<String, Object>> selectUnreadGroupBySender(@Param("userId") String userId);
     /**
-     * 某附件被哪条消息引用。
+     * 请求者是否为「引用了该附件的某条会话」的成员。
      *
-     * <p>用于下载鉴权：只有引用了该附件的会话成员才有权读取，
-     * 避免"登录了就能凭 id 遍历所有附件"。</p>
+     * <p>用于下载鉴权：直接按请求者的成员关系过滤，
+     * 避免"任取一条引用会话再判成员"时，同一附件被发到多个会话后
+     * 合法成员被无序 LIMIT 1 误拒。</p>
      */
-    String selectConversationIdByAttachment(@Param("attachmentId") String attachmentId);
+    String selectReadableConversationId(@Param("attachmentId") String attachmentId,
+                                        @Param("userId") String userId);
 }

@@ -37,9 +37,21 @@ public interface MenuService {
 
     List<RoleVO> listRoles();
 
-    RoleVO createRole(RoleRequest request, String operator);
+    /**
+     * 新建角色。
+     *
+     * @param operatorId 操作者用户ID，用于角色等级越权校验（不能创建比自己等级更高的角色）
+     * @param operator   操作者账号，审计字段
+     */
+    RoleVO createRole(RoleRequest request, String operatorId, String operator);
 
-    RoleVO updateRole(String id, RoleRequest request);
+    /**
+     * 编辑角色（roleCode 不接受修改）。
+     *
+     * @param operatorId 操作者用户ID，用于角色等级越权校验（不能把角色改成比自己等级更高）
+     * @param operator   操作者账号，审计字段
+     */
+    RoleVO updateRole(String id, RoleRequest request, String operatorId, String operator);
 
     void deleteRole(String id);
 
@@ -52,8 +64,13 @@ public interface MenuService {
 
     List<RoleVO> rolesOfUser(String userId);
 
-    /** 给用户分配角色（全量覆盖） */
-    int grantRolesToUser(String userId, List<String> roleIds, String operator);
+    /**
+     * 给用户分配角色（全量覆盖）。
+     *
+     * @param operatorId 操作者用户ID，用于角色等级越权校验（不能分配比自己等级更高的角色）
+     * @param operator   操作者账号，审计字段
+     */
+    int grantRolesToUser(String userId, List<String> roleIds, String operatorId, String operator);
 
     /**
      * 该用户是否可访问指定路径。

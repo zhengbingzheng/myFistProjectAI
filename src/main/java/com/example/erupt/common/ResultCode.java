@@ -15,6 +15,8 @@ public enum ResultCode {
     FORBIDDEN(403, "无权限访问"),
     /** 请求方法不被接口支持：例如对只接收 POST 的上传接口发 GET */
     METHOD_NOT_ALLOWED(405, "请求方法不支持"),
+    /** Content-Type 与接口期望不符：例如对 @RequestBody JSON 端点提交表单 */
+    UNSUPPORTED_MEDIA_TYPE(415, "Content-Type 不被支持"),
     /** 账号/资源已存在 */
     CONFLICT(409, "资源已存在"),
     /** 资源不存在 */

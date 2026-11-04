@@ -72,6 +72,9 @@ public class AuthProperties {
      */
     private boolean captchaRequired = false;
 
+    /** 连续失败达到该次数后要求输入验证码（与 loginMaxFailures 相互独立，可分别调整） */
+    private int captchaThreshold = 2;
+
     /** 是否开启鉴权拦截（关闭后所有接口放行，便于本地联调） */
     private boolean enabled = true;
 
@@ -168,6 +171,14 @@ public class AuthProperties {
 
     public void setCaptchaRequired(boolean captchaRequired) {
         this.captchaRequired = captchaRequired;
+    }
+
+    public int getCaptchaThreshold() {
+        return captchaThreshold;
+    }
+
+    public void setCaptchaThreshold(int captchaThreshold) {
+        this.captchaThreshold = captchaThreshold;
     }
 
     public boolean isEnabled() {

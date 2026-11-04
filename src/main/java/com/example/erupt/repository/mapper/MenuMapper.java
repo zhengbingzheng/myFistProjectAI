@@ -48,18 +48,24 @@ public interface MenuMapper {
 
     /* ---------- 用户-角色 ---------- */
 
-    int insertUserRole(UserRole userRole);
-
-    List<String> selectRoleIdsByUserId(@Param("userId") String userId);
+    /** 批量写入用户-角色关系（全量覆盖式授权的落点） */
+    int insertUserRoles(@Param("list") List<UserRole> list);
 
     /** 清空某用户的全部角色后再重建——全量覆盖式授权，避免逐个 diff */
     int deleteUserRolesByUserId(@Param("userId") String userId);
+
+    /** 角色删除时清理其全部用户关联，避免残留指向已删角色的悬挂引用 */
+    int deleteUserRolesByRoleId(@Param("roleId") String roleId);
 
     List<Role> selectRolesByUserId(@Param("userId") String userId);
 
     /* ---------- 角色-菜单 ---------- */
 
-    int insertRoleMenu(RoleMenu roleMenu);
+    /** 批量写入角色-菜单关系（全量覆盖式授权的落点） */
+    int insertRoleMenus(@Param("list") List<RoleMenu> list);
+
+    /** 全部角色-菜单关系，用于一次查询补齐所有角色的 menuIds（避免逐角色查询的 N+1） */
+    List<RoleMenu> selectAllRoleMenus();
 
     List<String> selectMenuIdsByRoleId(@Param("roleId") String roleId);
 
@@ -88,6 +94,6 @@ public interface MenuMapper {
      */
     int countPermissionForUser(@Param("userId") String userId, @Param("permission") String permission);
 
-    /** 用户的最高权限等级（角色等级取最小值） */
-    Integer selectUserMaxLevel(@Param("userId") String userId);
+    /** 用户的最高权限等级（角色等级取最小值，无角色返回 null） */
+    Integer selectUserMinRoleLevel(@Param("userId") String userId);
 }

@@ -24,6 +24,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.BufferedOutputStream;
@@ -79,6 +80,9 @@ public class AttachmentServiceImpl implements AttachmentService {
     /** 分页偏移量上限，超过后直接拒绝：LIMIT 的大 OFFSET 会扫描并丢弃大量行。 */
     private static final long MAX_OFFSET = 100_000L;
 
+    /** 清空回收站的分批大小：避免一次性载入过多实体与拼出巨型 IN。 */
+    private static final int RECYCLE_PURGE_BATCH_SIZE = 500;
+
     /** 允许的文件分类取值，用于校验查询参数是否合法。 */
     private static final Set<String> VALID_FILE_TYPES =
             Set.of("image", "document", "video", "audio", "archive", "other");
@@ -102,14 +106,9 @@ public class AttachmentServiceImpl implements AttachmentService {
             Set.of("image/svg+xml", "application/xhtml+xml");
 
     /**
-     * 需要降级为纯文本输出的类型前缀，包含 {@code text/html}。
-     *
-     * <p>HTML 是最常被用作 XSS 载体的类型，降级后预览里展示的是源码而不是渲染结果——
-     * 这是有意的安全取舍：宁可看不到排版，也不能执行上传者提供的脚本。</p>
+     * 需要降级为纯文本输出的类型清单已收敛到 {@link com.example.erupt.service.AttachmentMediaTypes}：
+     * 下载链路（控制器）与预览链路（这里）共用同一份裁决，避免两处清单漂移。
      */
-    private static final Set<String> SCRIPTABLE_TEXT_PREFIXES =
-            Set.of("text/", "application/json", "application/xml",
-                    "application/javascript", "application/xhtml+xml");
 
     /** 文本预览的统一输出类型，显式带字符集，避免中文源码乱码。 */
     private static final String TEXT_PLAIN_UTF_8 = "text/plain;charset=UTF-8";
@@ -134,11 +133,14 @@ public class AttachmentServiceImpl implements AttachmentService {
 
     private final AttachmentMapper attachmentMapper;
     private final AttachmentProperties properties;
+    private final TransactionTemplate transactionTemplate;
     private final Path storageRoot;
 
-    public AttachmentServiceImpl(AttachmentMapper attachmentMapper, AttachmentProperties properties) {
+    public AttachmentServiceImpl(AttachmentMapper attachmentMapper, AttachmentProperties properties,
+                                 TransactionTemplate transactionTemplate) {
         this.attachmentMapper = attachmentMapper;
         this.properties = properties;
+        this.transactionTemplate = transactionTemplate;
         this.storageRoot = Path.of(properties.getStorageDir()).toAbsolutePath().normalize();
         try {
             Files.createDirectories(storageRoot);
@@ -257,9 +259,9 @@ public class AttachmentServiceImpl implements AttachmentService {
 
     @Override
     public void streamDownload(AttachmentResource resource, OutputStream out) {
-        try {
-            copyTo(resource.path(), out);
-        } finally {
+        // 只有内容完整写出才计数：客户端中断/文件中途丢失的失败传输也 +1，
+        // download_count 就失去统计意义
+        if (copyTo(resource.path(), out)) {
             increaseDownloadCount(resource.attachment().getId());
         }
     }
@@ -285,13 +287,40 @@ public class AttachmentServiceImpl implements AttachmentService {
         copyTo(preview.path(), out);
     }
 
-    /** 统一的流式写出：下载与预览共用，两者唯一的差别是是否计数。 */
-    private void copyTo(Path path, OutputStream out) {
+    /**
+     * 统一的流式写出：下载与预览共用，两者唯一的差别是是否计数。
+     *
+     * @return 是否完整写出。客户端中途断开（关页面、取消下载）返回 false——
+     *         此时 200 响应头早已提交，包装成业务异常既改不了响应，
+     *         还会把每次用户取消都污染成"附件读取失败"告警，故按正常事件静默收场。
+     */
+    private boolean copyTo(Path path, OutputStream out) {
         try (InputStream in = Files.newInputStream(path)) {
             in.transferTo(out);
+            return true;
         } catch (IOException e) {
+            if (isClientAbort(e)) {
+                log.debug("客户端中断了附件传输：{}", e.getMessage());
+                return false;
+            }
             throw new BusinessException(ResultCode.INTERNAL_ERROR, "附件读取失败：" + e.getMessage());
         }
+    }
+
+    /** 判断 IO 异常是否由客户端主动断开引起（Tomcat 的 ClientAbortException、Broken pipe 等） */
+    private static boolean isClientAbort(IOException e) {
+        Throwable cause = e;
+        while (cause != null) {
+            if (cause.getClass().getName().contains("ClientAbort")) {
+                return true;
+            }
+            String msg = cause.getMessage();
+            if (msg != null && (msg.contains("Broken pipe") || msg.contains("Connection reset"))) {
+                return true;
+            }
+            cause = cause.getCause();
+        }
+        return false;
     }
 
     /**
@@ -311,7 +340,7 @@ public class AttachmentServiceImpl implements AttachmentService {
         return INLINE_MEDIA_TYPES.contains(type)
                 || INLINE_MEDIA_PREFIXES.stream().anyMatch(type::startsWith)
                 // 能按纯文本输出的类型，执行能力已被消除，可安全内联
-                || SCRIPTABLE_TEXT_PREFIXES.stream().anyMatch(type::startsWith);
+                || com.example.erupt.service.AttachmentMediaTypes.isScriptableText(type);
     }
 
     /**
@@ -327,7 +356,7 @@ public class AttachmentServiceImpl implements AttachmentService {
             return MediaType.APPLICATION_OCTET_STREAM_VALUE;
         }
         // 可内联的文本类一律以纯文本输出：浏览器不会把纯文本当文档解析，脚本自然无从谈起
-        if (SCRIPTABLE_TEXT_PREFIXES.stream().anyMatch(type::startsWith)) {
+        if (com.example.erupt.service.AttachmentMediaTypes.isScriptableText(type)) {
             return TEXT_PLAIN_UTF_8;
         }
         return type;
@@ -347,6 +376,11 @@ public class AttachmentServiceImpl implements AttachmentService {
                 increaseDownloadCount(resource.attachment().getId());
             }
         } catch (IOException e) {
+            // 客户端取消下载与真正的 IO 故障要分开：前者是正常事件，已写出的条目有效
+            if (isClientAbort(e)) {
+                log.debug("客户端中断了 ZIP 打包下载：{}", e.getMessage());
+                return;
+            }
             // 打包中途出错时前端拿到的会是残缺的 ZIP，只能提示重传/重试
             throw new BusinessException(ResultCode.INTERNAL_ERROR, "附件打包失败：" + e.getMessage());
         }
@@ -437,7 +471,14 @@ public class AttachmentServiceImpl implements AttachmentService {
             name = name.substring(slash + 1);
         }
         name = name.trim();
-        return name.isEmpty() ? "unnamed" : name;
+        if (name.isEmpty() || ".".equals(name) || "..".equals(name)) {
+            // ".." 这类名字入库无害，但作为 ZIP 条目发给客户端后，
+            // 个别解压器会把它当父目录处理，统一替换掉
+            return "unnamed";
+        }
+        // schema 里 original_name 是 VARCHAR(255)：显式截断，
+        // 不依赖数据库 sql_mode 是否严格（宽松模式下超长会被静默截断成乱码风险）
+        return name.length() > 255 ? name.substring(0, 255) : name;
     }
 
     private String extensionOf(String filename) {
@@ -659,15 +700,21 @@ public class AttachmentServiceImpl implements AttachmentService {
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
     public int emptyRecycle() {
-        List<Attachment> recycled = attachmentMapper.selectAllRecycled();
-        if (recycled.isEmpty()) {
-            log.info("清空回收站：回收站为空，无需处理");
-            return 0;
+        // 分批清理：回收站没有自动到期任务，可能积压数万条——
+        // 一次性载入全部实体再拼单条巨型 IN 会同时顶到内存与 JDBC 占位符上限（65535）。
+        // 每批用独立事务完成"删记录→提交后删文件"：批间无耦合才真正成立，
+        // 任一批失败只回滚该批，事务持锁时间也不随积压量增长。
+        // （方法级 @Transactional 会把全部批次圈进一个大事务，与分批设计自相矛盾，故不使用）
+        int affected = 0;
+        while (true) {
+            List<Attachment> batch = attachmentMapper.selectRecycledBatch(RECYCLE_PURGE_BATCH_SIZE);
+            if (batch.isEmpty()) {
+                break;
+            }
+            Integer purged = transactionTemplate.execute(status -> purgeRecycled(batch));
+            affected += purged == null ? 0 : purged;
         }
-        int affected = purgeRecycled(recycled);
-        // 用实际删除行数回执，而不是入参条数：两者不一致时说明有记录被并发改过
         log.info("清空回收站完成，共 {} 条", affected);
         return affected;
     }
@@ -735,13 +782,14 @@ public class AttachmentServiceImpl implements AttachmentService {
      * @param affected 数据库返回的实际受影响行数
      * @param expected 预期受影响行数
      * @param action   操作名，用于拼错误提示
-     * @throws BusinessException 行数与预期不符（500）
+     * @throws BusinessException 行数与预期不符（409：数据状态已被并发修改）
      */
     private void requireAffected(int affected, int expected, String action) {
         if (affected != expected) {
             log.warn("{}失败：预期影响 {} 行，实际 {} 行，事务将回滚", action, expected, affected);
-            throw new BusinessException(ResultCode.INTERNAL_ERROR,
-                    action + "失败：预期影响 " + expected + " 条，实际 " + affected + " 条，操作已回滚");
+            throw new BusinessException(ResultCode.CONFLICT,
+                    action + "失败：数据状态已被其他操作修改，请刷新后重试"
+                            + "（预期影响 " + expected + " 条，实际 " + affected + " 条）");
         }
     }
 

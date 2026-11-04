@@ -123,19 +123,21 @@ public class LoginAttemptService {
     }
 
     /**
-     * 是否需要输入验证码（连续失败 2 次及以上时启用，正常用户不受打扰）。
+     * 是否需要输入验证码（连续失败达到 {@code app.auth.captcha-threshold} 次及以上时启用，
+     * 正常用户不受打扰）。
      */
     public boolean needCaptcha(String username, String clientIp) {
         if (properties.isCaptchaRequired()) {
             return true;
         }
+        int threshold = Math.max(1, properties.getCaptchaThreshold());
         try {
             String countStr = redisTemplate.opsForValue().get(properties.getLoginFailPrefix() + scope(username, clientIp));
             int count = countStr == null ? 0 : Integer.parseInt(countStr);
-            return count >= 2;
+            return count >= threshold;
         } catch (RuntimeException e) {
             AtomicInteger local = localFailures.get(scope(username, clientIp));
-            return local != null && local.get() >= 2;
+            return local != null && local.get() >= threshold;
         }
     }
 

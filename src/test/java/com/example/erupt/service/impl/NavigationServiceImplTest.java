@@ -223,14 +223,16 @@ class NavigationServiceImplTest {
     }
 
     @Test
-    @DisplayName("delete_affectedRowsZero_returnsFalse")
+    @DisplayName("delete_affectedRowsZero_复核存在则抛内部错误")
     void delete_affectedRowsZero_returnsFalse() {
         when(navigationMapper.selectById(ID_7)).thenReturn(mockNavigation(ID_7, "A", "http://a", "运维", "da"));
         when(navigationMapper.deleteById(ID_7)).thenReturn(0);
 
-        Result<Void> result = navigationService.delete(ID_7);
-        assertThat(result.code()).isEqualTo(ResultCode.INTERNAL_ERROR.code());
-        assertThat(result.message()).isEqualTo("删除失败");
+        // affected=0 但复核记录还在：真正的写失败，抛 500 而不是返回 HTTP 200 + 信封失败
+        assertThatThrownBy(() -> navigationService.delete(ID_7))
+                .isInstanceOf(BusinessException.class)
+                .extracting(ex -> ((BusinessException) ex).resultCode())
+                .isEqualTo(ResultCode.INTERNAL_ERROR);
         verify(navigationMapper).deleteById(ID_7);
     }
 
@@ -337,15 +339,16 @@ class NavigationServiceImplTest {
     }
 
     @Test
-    @DisplayName("deleteBatch_affectedRowsZero_returnsFailure")
+    @DisplayName("deleteBatch_affectedRows不足_整批失败抛404")
     void deleteBatch_affectedRowsZero_returnsFailure() {
         when(navigationMapper.countByIds(List.of(ID_1))).thenReturn(1L);
         when(navigationMapper.deleteByIds(List.of(ID_1))).thenReturn(0);
 
-        Result<Void> result = navigationService.deleteBatch(List.of(ID_1));
-
-        assertThat(result.code()).isEqualTo(ResultCode.INTERNAL_ERROR.code());
-        assertThat(result.message()).isEqualTo("批量删除失败");
+        // 行数不足 = count-then-delete 间隙被并发删掉，整批失败并回滚，不产生部分删除
+        assertThatThrownBy(() -> navigationService.deleteBatch(List.of(ID_1)))
+                .isInstanceOf(BusinessException.class)
+                .extracting(ex -> ((BusinessException) ex).resultCode())
+                .isEqualTo(ResultCode.NOT_FOUND);
     }
 
     /* ---------------------------------------------------------------------- */

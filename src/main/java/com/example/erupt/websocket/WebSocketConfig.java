@@ -44,7 +44,12 @@ public class WebSocketConfig implements WebSocketConfigurer {
         var registration = registry.addHandler(chatHandler, "/ws/chat")
                 .addInterceptors(new ChatHandshakeInterceptor(tokenService));
         if (allowedOrigins != null && !allowedOrigins.isBlank()) {
-            registration.setAllowedOrigins(allowedOrigins.split(","));
+            // 配置值按逗号切分后必须 trim：允许运维写 "http://a.com, http://b.com"，
+            // 带空格的 Origin 与浏览器上报值严格比较永远不等，握手会静默 403
+            registration.setAllowedOrigins(java.util.Arrays.stream(allowedOrigins.split(","))
+                    .map(String::trim)
+                    .filter(origin -> !origin.isEmpty())
+                    .toArray(String[]::new));
         }
     }
 }

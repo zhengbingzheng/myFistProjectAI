@@ -50,9 +50,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             closeQuietly(session);
             return;
         }
-        registry.register(userId, session);
-        // 只在"该用户的第一条连接"时广播上线：多标签页同时打开不该给对端发一串重复通知
-        if (registry.countSessions(userId) == 1) {
+        // 只在"该用户的第一条连接"时广播上线：多标签页同时打开不该给对端发一串重复通知。
+        // 判断由 register 在锁内原子返回——注册后再读 countSessions 会在并发建连时漏报
+        if (registry.register(userId, session)) {
             chatService.broadcastPresence(userId, true);
         }
         // 上线即推送未读概览：覆盖"登录后立刻弹提醒"的场景，
@@ -87,10 +87,18 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
         if ("read".equals(type)) {
-            // 已读回执：进入会话后告诉服务端清未读，其他人那边不需要感知
+            // 已读回执：进入会话后告诉服务端清未读，其他人那边不需要感知。
+            // 必须兜住异常：markRead 的业务校验（403）或瞬时 DB 异常一旦冒出这里，
+            // Spring 会把整条 WebSocket 连接按 SERVER_ERROR 关闭——
+            // 一个格式合法的 read 帧不应该有砍断聊天长连接的威力
             Object convId = frame.get("conversationId");
             if (convId != null) {
-                chatService.markRead(userId, String.valueOf(convId));
+                try {
+                    chatService.markRead(userId, String.valueOf(convId));
+                } catch (Exception e) {
+                    log.warn("已读回执处理失败 userId={} conversationId={} 原因={}",
+                            userId, convId, e.getMessage());
+                }
             }
         }
     }

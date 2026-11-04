@@ -16,6 +16,9 @@ public record KnowledgeCreateRequest(
         String name,
 
         @NotBlank(message = "正文不能为空")
+        // knowledge_content 是 mediumtext（16MB），不加约束时单条请求可合法携带数十 MB 正文，
+        // 是内存与存储层面的低成本滥用面；1MB 对富文本已非常宽裕
+        @Size(max = 1_000_000, message = "正文不能超过 100 万个字符")
         String content,
 
         @NotBlank(message = "类型不能为空")

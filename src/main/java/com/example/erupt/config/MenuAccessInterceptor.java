@@ -14,7 +14,6 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.HandlerInterceptor;
 
 import java.nio.charset.StandardCharsets;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
@@ -174,10 +173,5 @@ public class MenuAccessInterceptor implements HandlerInterceptor {
         } catch (Exception e) {
             // 响应写出失败时状态码已设置，前端仍会收到 403
         }
-    }
-
-    /** 预留：将来若需按角色等级限制数据范围，从这里扩展 */
-    public List<String> skippedPrefixes() {
-        return List.copyOf(SKIP_PREFIXES);
     }
 }

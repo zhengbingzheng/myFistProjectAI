@@ -18,6 +18,7 @@ public class WebMvcConfig implements WebMvcConfigurer {
 
     private final AuthInterceptor authInterceptor;
     private final MenuAccessInterceptor menuAccessInterceptor;
+    private final OperationLogInterceptor operationLogInterceptor;
 
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
@@ -30,5 +31,12 @@ public class WebMvcConfig implements WebMvcConfigurer {
         registry.addInterceptor(menuAccessInterceptor)
                 .addPathPatterns("/api/**")
                 .order(2);
+
+        // 操作日志排在最后（order=3）：preHandle 只记开始时间（必然放行），
+        // afterCompletion 在整条链路结束后拿最终状态码，位置越靠后覆盖越完整。
+        // 注意它位于鉴权之后，鉴权短路的请求（401/403）不会产生日志，取舍见其类注释。
+        registry.addInterceptor(operationLogInterceptor)
+                .addPathPatterns("/api/**")
+                .order(3);
     }
 }

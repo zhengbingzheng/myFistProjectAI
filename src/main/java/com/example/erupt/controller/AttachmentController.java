@@ -9,6 +9,7 @@ import com.example.erupt.model.dto.BatchRestoreRequest;
 import com.example.erupt.model.vo.AttachmentRecycleVO;
 import com.example.erupt.model.vo.AttachmentVO;
 import com.example.erupt.repository.entity.Attachment;
+import com.example.erupt.service.AttachmentMediaTypes;
 import com.example.erupt.service.AttachmentPreview;
 import com.example.erupt.service.AttachmentResource;
 import com.example.erupt.service.AttachmentService;
@@ -82,18 +83,27 @@ public class AttachmentController {
 
     /**
      * 下载单个附件：直接返回文件流，浏览器可据 Content-Type 决定预览还是另存。
+     *
+     * <p>contentType 是上传时客户端自报的，可被声明为 text/html 等可脚本化类型；
+     * 下载统一补 nosniff，且命中可脚本化类型时降级为纯文本输出——
+     * 与预览链路的裁决保持同一口径，不依赖 Content-Disposition 单独兜底。</p>
      */
     @GetMapping("/{id}/download")
     public ResponseEntity<StreamingResponseBody> download(@PathVariable String id) {
         AttachmentResource resource = attachmentService.getResource(id);
         Attachment attachment = resource.attachment();
         StreamingResponseBody body = out -> attachmentService.streamDownload(resource, out);
-        return ResponseEntity.ok()
-                .contentType(resolveMediaType(attachment.getContentType()))
+        ResponseEntity.BodyBuilder builder = ResponseEntity.ok()
+                .contentType(resolveMediaType(previewSafeType(attachment.getContentType())))
                 .header(HttpHeaders.CONTENT_DISPOSITION,
                         disposition("attachment", attachment.getOriginalName()))
-                .header(HttpHeaders.CONTENT_LENGTH, String.valueOf(sizeOf(attachment)))
-                .body(body);
+                .header("X-Content-Type-Options", "nosniff");
+        // 尺寸未知（file_size 为 null 的历史脏数据）时不声明 Content-Length：
+        // 硬写 0 会让容器按 0 字节截断真实有内容的响应，客户端拿到空文件还无从察觉
+        if (attachment.getFileSize() != null && attachment.getFileSize() >= 0) {
+            builder.header(HttpHeaders.CONTENT_LENGTH, String.valueOf(attachment.getFileSize()));
+        }
+        return builder.body(body);
     }
 
     /**
@@ -114,9 +124,8 @@ public class AttachmentController {
     public ResponseEntity<StreamingResponseBody> preview(@PathVariable String id) {
         AttachmentPreview preview = attachmentService.getPreview(id);
         StreamingResponseBody body = out -> attachmentService.streamPreview(preview, out);
-        return ResponseEntity.ok()
+        ResponseEntity.BodyBuilder builder = ResponseEntity.ok()
                 .contentType(resolveMediaType(preview.contentType()))
-                .header(HttpHeaders.CONTENT_LENGTH, String.valueOf(preview.size()))
                 // 禁止 MIME 嗅探：防止浏览器把内容"猜"成 HTML 后执行其中的脚本
                 .header("X-Content-Type-Options", "nosniff")
                 // 禁止加载任何子资源；仅对文本类再叠加 sandbox
@@ -126,8 +135,13 @@ public class AttachmentController {
                         : "default-src 'none'")
                 .header(HttpHeaders.CONTENT_DISPOSITION,
                         disposition(preview.inline() ? "inline" : "attachment",
-                                preview.attachment().getOriginalName()))
-                .body(body);
+                                preview.attachment().getOriginalName()));
+        // 同下载链路：file_size 为 null 的脏数据不声明 Content-Length，避免按 0 字节截断
+        Long fileSize = preview.attachment().getFileSize();
+        if (fileSize != null && fileSize >= 0) {
+            builder.header(HttpHeaders.CONTENT_LENGTH, String.valueOf(fileSize));
+        }
+        return builder.body(body);
     }
 
     /**
@@ -272,10 +286,6 @@ public class AttachmentController {
                 purged == 0 ? "回收站为空，无需清空" : "回收站已清空，共清除 " + purged + " 个附件"));
     }
 
-    private long sizeOf(Attachment attachment) {
-        return attachment.getFileSize() == null ? 0L : attachment.getFileSize();
-    }
-
     /**
      * 优先用库里记录的媒体类型，缺失或非法时退化为二进制流（保证总能下载）。
      */
@@ -288,6 +298,17 @@ public class AttachmentController {
         } catch (InvalidMediaTypeException e) {
             return MediaType.APPLICATION_OCTET_STREAM;
         }
+    }
+
+    /**
+     * 下载链路的媒体类型裁决：可脚本化的文本类（html/json/xml/js，自报的 contentType 不可信）
+     * 降级为 text/plain——与预览链路同一口径，浏览器不会把响应体当文档解析执行。
+     *
+     * <p>裁决清单收敛在 {@link AttachmentMediaTypes}，与预览链路共用同一份，不会各自漂移。</p>
+     */
+    private String previewSafeType(String contentType) {
+        return AttachmentMediaTypes.isScriptableText(contentType)
+                ? "text/plain;charset=UTF-8" : contentType;
     }
 
     /**

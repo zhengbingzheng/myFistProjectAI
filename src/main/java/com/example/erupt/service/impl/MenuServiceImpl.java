@@ -44,7 +44,6 @@ public class MenuServiceImpl implements MenuService {
     private static final String ROOT_PARENT_ID = "0";
 
     private final MenuMapper menuMapper;
-    /** 校验"给用户分配角色"的目标账号真实存在（防止给幽灵账号挂授权记录） */
     private final UserMapper userMapper;
 
     public MenuServiceImpl(MenuMapper menuMapper, UserMapper userMapper) {
@@ -60,7 +59,7 @@ public class MenuServiceImpl implements MenuService {
     @Override
     public List<MenuVO> selectMenusByUserId(String userId) {
         List<Menu> authorized = menuMapper.selectMenusByUserId(userId);
-        return buildTree(pruneNorParented(authorized));
+        return buildTree(fillMissingAncestors(authorized));
     }
 
     @Override
@@ -94,7 +93,7 @@ public class MenuServiceImpl implements MenuService {
         menu.setRemark(request.remark());
         menu.setDelFlag("0");
         menu.setCreateBy(operator);
-        menuMapper.insertMenu(menu);
+        requireAffected(menuMapper.insertMenu(menu), "菜单新增失败");
         log.info("新建菜单 id={} name={} parent={} operator={}", menu.getId(), menu.getMenuName(), parentId, operator);
         return toVO(menuMapper.selectMenuById(menu.getId()), List.of());
     }
@@ -120,7 +119,7 @@ public class MenuServiceImpl implements MenuService {
         if (request.menuName() != null) {
             existing.setMenuName(request.menuName());
         }
-        if (request.menuCode() != null) {
+        if (request.menuCode() != null && !request.menuCode().isBlank()) {
             Menu duplicated = menuMapper.selectMenuByCode(request.menuCode());
             if (duplicated != null && !duplicated.getId().equals(id)) {
                 throw new BusinessException(ResultCode.CONFLICT, "菜单编码已存在");
@@ -130,19 +129,31 @@ public class MenuServiceImpl implements MenuService {
         if (request.menuType() != null) {
             existing.setMenuType(request.menuType());
         }
-        existing.setPath(request.path());
-        existing.setComponent(request.component());
-        existing.setIcon(request.icon());
+        // 与其余字段一致按 null 跳过：XML 的 <if> 同样过滤 null，
+        // 此前这里的无条件 set 只是无效赋值，还让人误以为传 null 能清空字段
+        if (request.path() != null) {
+            existing.setPath(request.path());
+        }
+        if (request.component() != null) {
+            existing.setComponent(request.component());
+        }
+        if (request.icon() != null) {
+            existing.setIcon(request.icon());
+        }
         if (request.sortNum() != null) {
             existing.setSortNum(request.sortNum());
         }
         if (request.visible() != null) {
             existing.setVisible(request.visible());
         }
-        existing.setPermission(request.permission());
-        existing.setRemark(request.remark());
+        if (request.permission() != null) {
+            existing.setPermission(request.permission());
+        }
+        if (request.remark() != null) {
+            existing.setRemark(request.remark());
+        }
         existing.setUpdateBy(operator);
-        menuMapper.updateMenu(existing);
+        requireAffected(menuMapper.updateMenu(existing), "菜单更新失败");
         return toVO(menuMapper.selectMenuById(id), List.of());
     }
 
@@ -160,7 +171,7 @@ public class MenuServiceImpl implements MenuService {
         Menu menu = new Menu();
         menu.setId(id);
         menu.setDelFlag("1");
-        menuMapper.updateMenu(menu);
+        requireAffected(menuMapper.updateMenu(menu), "菜单删除失败");
         log.info("删除菜单 id={}", id);
     }
 
@@ -168,48 +179,59 @@ public class MenuServiceImpl implements MenuService {
 
     @Override
     public List<RoleVO> listRoles() {
-        List<RoleVO> result = new ArrayList<>();
-        for (Role role : menuMapper.selectAllRoles()) {
+        List<Role> roles = menuMapper.selectAllRoles();
+        // 一次取回全部角色-菜单关系在内存分组，避免逐角色查一次的 N+1
+        Map<String, List<String>> menuIdsByRole = new HashMap<>();
+        for (RoleMenu relation : menuMapper.selectAllRoleMenus()) {
+            menuIdsByRole.computeIfAbsent(relation.getRoleId(), k -> new ArrayList<>())
+                    .add(relation.getMenuId());
+        }
+        List<RoleVO> result = new ArrayList<>(roles.size());
+        for (Role role : roles) {
             result.add(new RoleVO(role.getId(), role.getRoleCode(), role.getRoleName(),
                     role.getRoleLevel(), role.getDescription(), role.getCreateTime(),
-                    menuMapper.selectMenuIdsByRoleId(role.getId())));
+                    menuIdsByRole.getOrDefault(role.getId(), List.of())));
         }
         return result;
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public RoleVO createRole(RoleRequest request, String operator) {
+    public RoleVO createRole(RoleRequest request, String operatorId, String operator) {
         Role duplicated = menuMapper.selectRoleByCode(request.roleCode());
         if (duplicated != null) {
             throw new BusinessException(ResultCode.CONFLICT, "角色编码已存在");
         }
+        int level = request.roleLevel() == null ? 10 : request.roleLevel();
+        requireNoEscalation(level, operatorId);
         Role role = new Role();
         role.setId(newId());
         role.setRoleCode(request.roleCode());
         role.setRoleName(request.roleName());
-        role.setRoleLevel(request.roleLevel() == null ? 10 : request.roleLevel());
+        role.setRoleLevel(level);
         role.setDescription(request.description());
         role.setDelFlag("0");
         role.setCreateBy(operator);
-        menuMapper.insertRole(role);
+        requireAffected(menuMapper.insertRole(role), "角色新增失败");
         return new RoleVO(role.getId(), role.getRoleCode(), role.getRoleName(),
                 role.getRoleLevel(), role.getDescription(), role.getCreateTime(), List.of());
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public RoleVO updateRole(String id, RoleRequest request) {
-        Role existing = menuMapper.selectRoleById(id);
-        if (existing == null) {
-            throw new BusinessException(ResultCode.NOT_FOUND, "角色不存在");
-        }
+    public RoleVO updateRole(String id, RoleRequest request, String operatorId, String operator) {
+        Role existing = requireRole(id);
+        // roleCode 是程序内引用的稳定标识，编辑接口不接受修改
         existing.setRoleName(request.roleName());
         if (request.roleLevel() != null) {
+            requireNoEscalation(request.roleLevel(), operatorId);
             existing.setRoleLevel(request.roleLevel());
         }
-        existing.setDescription(request.description());
-        menuMapper.updateRole(existing);
+        if (request.description() != null) {
+            existing.setDescription(request.description());
+        }
+        existing.setUpdateBy(operator);
+        requireAffected(menuMapper.updateRole(existing), "角色更新失败");
         Role updated = menuMapper.selectRoleById(id);
         return new RoleVO(updated.getId(), updated.getRoleCode(), updated.getRoleName(),
                 updated.getRoleLevel(), updated.getDescription(), updated.getCreateTime(),
@@ -219,16 +241,19 @@ public class MenuServiceImpl implements MenuService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void deleteRole(String id) {
-        Role existing = menuMapper.selectRoleById(id);
-        if (existing != null && Integer.valueOf(0).equals(existing.getRoleLevel())) {
+        Role existing = requireRole(id);
+        if (Integer.valueOf(0).equals(existing.getRoleLevel())) {
             // 超级管理员角色不可删：删掉后没有任何人有权限恢复，系统直接进入不可用状态
             throw new BusinessException(ResultCode.BAD_REQUEST, "超级管理员角色不可删除");
         }
         menuMapper.deleteRoleMenusByRoleId(id);
+        // 用户-角色关联一并清掉：角色已软删除，关联行留着只会越积越多
+        menuMapper.deleteUserRolesByRoleId(id);
         Role role = new Role();
         role.setId(id);
         role.setDelFlag("1");
-        menuMapper.updateRole(role);
+        requireAffected(menuMapper.updateRole(role), "角色删除失败");
+        log.info("删除角色 id={}", id);
     }
 
     @Override
@@ -238,10 +263,10 @@ public class MenuServiceImpl implements MenuService {
         if (role == null) {
             throw new BusinessException(ResultCode.NOT_FOUND, "角色不存在");
         }
+        // 二次鉴权：操作者不能给比自己等级更高的角色授权菜单（数字越小越高，0=超管）。
+        // 漏了这道防线，普通管理员就能借"给超管角色配菜单"变相提权
         int roleLevel = role.getRoleLevel() == null ? Integer.MAX_VALUE : role.getRoleLevel();
-        int operatorLevel = currentUserLevel();
-        // 二次鉴权：操作者不能给比自己等级更高的角色授权菜单（数字越小越高，0=超管）
-        if (roleLevel < operatorLevel) {
+        if (roleLevel < userLevel(AuthContext.currentUserId())) {
             throw new BusinessException(ResultCode.FORBIDDEN,
                     "无权给该角色授权菜单（角色等级高于当前操作者）");
         }
@@ -253,7 +278,7 @@ public class MenuServiceImpl implements MenuService {
         for (Menu menu : menuMapper.selectAllMenus()) {
             validMenuIds.add(menu.getId());
         }
-        int count = 0;
+        List<RoleMenu> relations = new ArrayList<>();
         for (String menuId : new HashSet<>(menuIds)) {
             if (menuId == null || menuId.isBlank() || !validMenuIds.contains(menuId)) {
                 continue;
@@ -263,15 +288,19 @@ public class MenuServiceImpl implements MenuService {
             relation.setRoleId(roleId);
             relation.setMenuId(menuId);
             relation.setCreateBy(operator);
-            menuMapper.insertRoleMenu(relation);
-            count++;
+            relations.add(relation);
         }
-        log.info("角色授权菜单 roleId={} 授权数量={} operator={}", roleId, count, operator);
-        return count;
+        if (!relations.isEmpty()) {
+            requireAffected(menuMapper.insertRoleMenus(relations), "角色授权失败");
+        }
+        log.info("角色授权菜单 roleId={} 授权数量={} operator={}", roleId, relations.size(), operator);
+        return relations.size();
     }
 
     @Override
     public List<String> menuIdsOfRole(String roleId) {
+        // 与 grantMenusToRole 口径对齐：角色不存在就是 404，而不是悄悄返回空列表
+        requireRole(roleId);
         return menuMapper.selectMenuIdsByRoleId(roleId);
     }
 
@@ -289,44 +318,55 @@ public class MenuServiceImpl implements MenuService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public int grantRolesToUser(String userId, List<String> roleIds, String operator) {
-        // 目标账号必须真实存在且未删除，否则删除旧授权后会留下指向幽灵账号的角色记录，
-        // 这些记录还会参与 hasPermission / userLevel 的 JOIN 统计，逐条排查很痛苦
+    public int grantRolesToUser(String userId, List<String> roleIds, String operatorId, String operator) {
+        // 不校验用户存在的话，给不存在的 userId 授权会"成功"，留下一批谁也读不到的关联行
         if (userMapper.selectById(userId) == null) {
-            throw new BusinessException(ResultCode.NOT_FOUND, "目标用户不存在：" + userId);
+            throw new BusinessException(ResultCode.NOT_FOUND, "用户不存在");
         }
+        int ownLevel = userLevel(operatorId);
+        // 目标用户当前的最高权限等级（无角色为 MAX_VALUE）：不能动比自己等级更高的用户的角色。
+        // 这道防线必须盖住空列表路径，否则"不能给超管授权，却能用空列表把超管的角色清空"——
+        // 下面的逐角色校验只看要授予的角色，管不住"清空"这个动作
+        Integer targetLevel = menuMapper.selectUserMinRoleLevel(userId);
+        if (targetLevel != null && targetLevel < ownLevel) {
+            throw new BusinessException(ResultCode.FORBIDDEN, "不能修改比自己等级更高的用户的角色");
+        }
+        if (roleIds != null && !roleIds.isEmpty()) {
+            // 一次取回全部角色：既是有效性过滤的白名单，也是等级越权校验的依据
+            Map<String, Integer> levelByRole = new HashMap<>();
+            for (Role role : menuMapper.selectAllRoles()) {
+                levelByRole.put(role.getId(), role.getRoleLevel());
+            }
+            // 整批校验等级：任一角色比操作者等级更高则一条都不写
+            for (String roleId : new HashSet<>(roleIds)) {
+                Integer level = levelByRole.get(roleId);
+                if (level != null && level < ownLevel) {
+                    throw new BusinessException(ResultCode.FORBIDDEN, "不能分配比自己等级更高的角色");
+                }
+            }
+            menuMapper.deleteUserRolesByUserId(userId);
+            List<UserRole> relations = new ArrayList<>();
+            for (String roleId : new HashSet<>(roleIds)) {
+                if (roleId == null || roleId.isBlank() || !levelByRole.containsKey(roleId)) {
+                    continue;
+                }
+                UserRole relation = new UserRole();
+                relation.setId(newId());
+                relation.setUserId(userId);
+                relation.setRoleId(roleId);
+                relation.setDelFlag("0");
+                relation.setCreateBy(operator);
+                relations.add(relation);
+            }
+            if (!relations.isEmpty()) {
+                requireAffected(menuMapper.insertUserRoles(relations), "用户授权失败");
+            }
+            log.info("用户分配角色 userId={} 角色数={} operator={}", userId, relations.size(), operator);
+            return relations.size();
+        }
+        // 空列表 = 清空该用户全部角色，同样走"先删后插"的前半段
         menuMapper.deleteUserRolesByUserId(userId);
-        if (roleIds == null || roleIds.isEmpty()) {
-            return 0;
-        }
-        Map<String, Role> roleById = new HashMap<>();
-        for (Role role : menuMapper.selectAllRoles()) {
-            roleById.put(role.getId(), role);
-        }
-        int operatorLevel = currentUserLevel();
-        int count = 0;
-        for (String roleId : new HashSet<>(roleIds)) {
-            if (roleId == null || roleId.isBlank() || !roleById.containsKey(roleId)) {
-                continue;
-            }
-            Role role = roleById.get(roleId);
-            int roleLevel = role.getRoleLevel() == null ? Integer.MAX_VALUE : role.getRoleLevel();
-            // 二次鉴权：操作者不能授予比自己等级更高的角色（数字越小越高，0=超管）
-            if (roleLevel < operatorLevel) {
-                throw new BusinessException(ResultCode.FORBIDDEN,
-                        "无权授予该角色（高于当前操作者等级）：" + role.getRoleName());
-            }
-            UserRole relation = new UserRole();
-            relation.setId(newId());
-            relation.setUserId(userId);
-            relation.setRoleId(roleId);
-            relation.setDelFlag("0");
-            relation.setCreateBy(operator);
-            menuMapper.insertUserRole(relation);
-            count++;
-        }
-        log.info("用户分配角色 userId={} 角色数={} operator={}", userId, count, operator);
-        return count;
+        return 0;
     }
 
     @Override
@@ -347,14 +387,8 @@ public class MenuServiceImpl implements MenuService {
 
     @Override
     public Integer userLevel(String userId) {
-        Integer level = menuMapper.selectUserMaxLevel(userId);
+        Integer level = menuMapper.selectUserMinRoleLevel(userId);
         return level == null ? Integer.MAX_VALUE : level;
-    }
-
-    /** 当前操作者的角色等级：取所有角色中的最小 role_level（数字越小越高），无角色时为 Integer.MAX_VALUE。 */
-    private int currentUserLevel() {
-        String operatorId = AuthContext.currentUserId();
-        return operatorId == null ? Integer.MAX_VALUE : userLevel(operatorId);
     }
 
     /* ---------- 内部方法 ---------- */
@@ -402,11 +436,32 @@ public class MenuServiceImpl implements MenuService {
      * 若直接按 parent_id 组装，子节点会因找不到父节点被当作顶级，
      * 出现一个孤零零的子菜单。这里统一补上缺失的祖先，
      * 保证前端拿到的树是完整可渲染的。
+     *
+     * <p>先在已授权集合内把每条祖先链走到底：链上任何一个ID不在集合里即为缺失，
+     * 只有确有缺失时才值得再查一次全表来补齐。</p>
      */
-    private List<Menu> pruneNorParented(List<Menu> authorized) {
-        Set<String> ownedIds = new HashSet<>();
+    private List<Menu> fillMissingAncestors(List<Menu> authorized) {
+        Map<String, Menu> owned = new HashMap<>();
         for (Menu menu : authorized) {
-            ownedIds.add(menu.getId());
+            owned.put(menu.getId(), menu);
+        }
+        boolean missing = false;
+        for (Menu menu : authorized) {
+            String parentId = menu.getParentId();
+            while (parentId != null && !ROOT_PARENT_ID.equals(parentId)) {
+                Menu parent = owned.get(parentId);
+                if (parent == null) {
+                    missing = true;
+                    break;
+                }
+                parentId = parent.getParentId();
+            }
+            if (missing) {
+                break;
+            }
+        }
+        if (!missing) {
+            return authorized;
         }
         Map<String, Menu> all = new LinkedHashMap<>();
         for (Menu menu : menuMapper.selectAllMenus()) {
@@ -417,7 +472,7 @@ public class MenuServiceImpl implements MenuService {
         for (Menu menu : authorized) {
             String parentId = menu.getParentId();
             while (parentId != null && !ROOT_PARENT_ID.equals(parentId) && all.containsKey(parentId)) {
-                if (ownedIds.contains(parentId) || added.contains(parentId)) {
+                if (owned.containsKey(parentId) || added.contains(parentId)) {
                     break;
                 }
                 result.add(all.get(parentId));
@@ -428,15 +483,19 @@ public class MenuServiceImpl implements MenuService {
         return result;
     }
 
-    /** 判断 candidateId 是否是 ancestorId 的子孙（向上追溯 parent 链） */
+    /** 判断 candidateId 是否是 ancestorId 的子孙（一次载入全表后在内存回溯 parent 链） */
     private boolean isDescendant(String candidateId, String ancestorId) {
+        Map<String, Menu> all = new HashMap<>();
+        for (Menu menu : menuMapper.selectAllMenus()) {
+            all.put(menu.getId(), menu);
+        }
         String current = candidateId;
         // 最多追溯 32 层：既是防止数据成环时死循环，正常业务也不会有这么深的菜单
         for (int i = 0; i < 32 && current != null && !ROOT_PARENT_ID.equals(current); i++) {
             if (ancestorId.equals(current)) {
                 return true;
             }
-            Menu node = menuMapper.selectMenuById(current);
+            Menu node = all.get(current);
             if (node == null) {
                 return false;
             }
@@ -451,6 +510,38 @@ public class MenuServiceImpl implements MenuService {
             throw new BusinessException(ResultCode.NOT_FOUND, "菜单不存在");
         }
         return menu;
+    }
+
+    private Role requireRole(String id) {
+        Role role = menuMapper.selectRoleById(id);
+        if (role == null) {
+            throw new BusinessException(ResultCode.NOT_FOUND, "角色不存在");
+        }
+        return role;
+    }
+
+    /**
+     * 项目约定：所有写操作都要校验数据库返回的受影响行数，
+     * 不符即判定业务失败并回滚，绝不返回"部分成功"这种无法判断结果的状态。
+     */
+    private static void requireAffected(int affected, String message) {
+        if (affected < 1) {
+            log.warn("{} affected=0", message);
+            throw new BusinessException(ResultCode.INTERNAL_ERROR, message);
+        }
+    }
+
+    /**
+     * 角色等级越权校验：等级数字越小权限越高，
+     * 操作者不能创建/修改"比自己等级更高"（数字更小）的角色——
+     * 否则持有菜单管理权的管理员给自己造一个超级管理员角色就能一步提权，
+     * t_role 建表注释里"防止越权给自个儿提权"的意图由这里落地。
+     * 无角色（含 operatorId 为空）按最低权限处理，任何角色都创建不了。
+     */
+    private void requireNoEscalation(int level, String operatorId) {
+        if (level < userLevel(operatorId)) {
+            throw new BusinessException(ResultCode.FORBIDDEN, "角色等级不能高于操作者自身等级");
+        }
     }
 
     private static String normalizeParent(String parentId) {

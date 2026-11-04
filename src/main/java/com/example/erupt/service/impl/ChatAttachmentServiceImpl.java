@@ -125,6 +125,22 @@ public class ChatAttachmentServiceImpl implements ChatAttachmentService {
                 throw new BusinessException(ResultCode.INTERNAL_ERROR, "附件记录写入失败");
             }
             persisted = true;
+            // 方法体成功 ≠ 事务一定成功：提交发生在方法返回之后（连接中断、锁超时等），
+            // 提交失败时记录回滚而磁盘文件已落盘——注册回滚回调补删，
+            // 不给"只增不减"的孤儿文件再开一个口子
+            if (org.springframework.transaction.support.TransactionSynchronizationManager
+                    .isSynchronizationActive()) {
+                org.springframework.transaction.support.TransactionSynchronizationManager
+                        .registerSynchronization(new org.springframework.transaction.support.TransactionSynchronization() {
+                            @Override
+                            public void afterCompletion(int status) {
+                                if (status == STATUS_ROLLED_BACK || status == STATUS_UNKNOWN) {
+                                    deleteQuietly(target);
+                                    log.warn("聊天附件事务未提交，已清理落盘文件 id={}", id);
+                                }
+                            }
+                        });
+            }
             log.info("聊天附件上传成功 id={} name={} size={}B uploader={}", id, originalName, size, uploaderId);
             return entity;
         } catch (IOException e) {

@@ -239,15 +239,16 @@ class KnowledgeServiceImplTest {
     }
 
     @Test
-    @DisplayName("delete_affectedRowsZero_returnsFailure")
+    @DisplayName("delete_affectedRowsZero_复核存在则抛内部错误")
     void delete_affectedRowsZero_returnsFailure() {
         when(knowledgeMapper.selectById(ID_1)).thenReturn(mockKnowledge(ID_1, "java", "如何重置密码"));
         when(knowledgeMapper.deleteById(ID_1)).thenReturn(0);
 
-        Result<Void> result = knowledgeService.delete(ID_1);
-
-        assertThat(result.code()).isEqualTo(ResultCode.INTERNAL_ERROR.code());
-        assertThat(result.message()).isEqualTo("删除失败");
+        // affected=0 但复核记录还在：真正的写失败，抛 500 而不是返回 HTTP 200 + 信封失败
+        assertThatThrownBy(() -> knowledgeService.delete(ID_1))
+                .isInstanceOf(BusinessException.class)
+                .extracting(ex -> ((BusinessException) ex).resultCode())
+                .isEqualTo(ResultCode.INTERNAL_ERROR);
         verify(knowledgeMapper).deleteById(ID_1);
     }
 
@@ -423,15 +424,16 @@ class KnowledgeServiceImplTest {
     }
 
     @Test
-    @DisplayName("deleteBatch_affectedRowsZero_returnsFailure")
+    @DisplayName("deleteBatch_affectedRows不足_整批失败抛404")
     void deleteBatch_affectedRowsZero_returnsFailure() {
         when(knowledgeMapper.countByIds(List.of(ID_1))).thenReturn(1L);
         when(knowledgeMapper.deleteByIds(List.of(ID_1))).thenReturn(0);
 
-        Result<Void> result = knowledgeService.deleteBatch(List.of(ID_1));
-
-        assertThat(result.code()).isEqualTo(ResultCode.INTERNAL_ERROR.code());
-        assertThat(result.message()).isEqualTo("批量删除失败");
+        // 行数不足 = count-then-delete 间隙被并发删掉，整批失败并回滚，不产生部分删除
+        assertThatThrownBy(() -> knowledgeService.deleteBatch(List.of(ID_1)))
+                .isInstanceOf(BusinessException.class)
+                .extracting(ex -> ((BusinessException) ex).resultCode())
+                .isEqualTo(ResultCode.NOT_FOUND);
     }
 
     private Knowledge mockKnowledge(String id, String type, String name) {

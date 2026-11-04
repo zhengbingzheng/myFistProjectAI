@@ -47,6 +47,10 @@ class UserServiceImplTest {
     @Mock
     private com.example.erupt.service.MenuService menuService;
 
+    /** 删除/改密/重置密码后都会经它吊销该用户的全部会话 */
+    @Mock
+    private com.example.erupt.service.TokenService tokenService;
+
     @InjectMocks
     private UserServiceImpl userService;
 
@@ -240,6 +244,8 @@ class UserServiceImplTest {
         assertThat(result.code()).isEqualTo(ResultCode.SUCCESS.code());
         assertThat(result.message()).isEqualTo("删除成功");
         verify(userMapper).softDeleteById(eq("u-1"), isNull(), any(LocalDateTime.class));
+        // 删除后立即吊销该用户全部会话：账号都没了，Token 不能再活到 TTL
+        verify(tokenService).revokeAllForUser("u-1");
     }
 
     @Test

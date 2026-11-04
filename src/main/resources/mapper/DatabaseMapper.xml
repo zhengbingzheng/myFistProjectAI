@@ -6,8 +6,11 @@
       本模块全部查询 information_schema 系统视图，零业务表写入。
       schema / table / columnListSql 三个参数用 ${} 直接拼到 SQL 标识符位置
       （MySQL 不支持对库/表/列名做预编译），拼接前由 service 层完成白名单校验。
-      不写 resultMap：直接用 LinkedHashMap，map-underscore-to-camel-case=true
-      会把 COLUMN_NAME / TABLE_NAME 等自动转为 columnName / tableName。
+      不写 resultMap：直接用 LinkedHashMap。
+      【注意】MyBatis 的 map-underscore-to-camel-case 对 Map 结果【不生效】
+      （MapWrapper#findProperty 原样返回列标签），因此下面 selectTables / selectColumns
+      返回的键是 JDBC 原始大写列标签（TABLE_NAME / COLUMN_NAME…），
+      service 层必须用同样的原始标签取值，改成驼峰会静默拿到全 null。
     -->
 
     <!--
@@ -81,11 +84,15 @@
 
     <!--
       任意表的数据分页。
-      columnListSql 形如 `id`, `name`，由 service 层在白名单校验后拼接传入。
+      columnListSql 形如 `id`, `name`，orderBySql 形如 ORDER BY `id`，
+      均由 service 层在白名单校验后拼接传入。
+      没有 ORDER BY 时 MySQL 不保证行序稳定，LIMIT 翻页会出现重复行/漏行，
+      因此排序键是必选参数。
     -->
     <select id="selectTableData" resultType="java.util.LinkedHashMap">
         SELECT ${columnListSql}
         FROM `${schema}`.`${table}`
+        ${orderBySql}
         LIMIT #{offset}, #{limit}
     </select>
 </mapper>

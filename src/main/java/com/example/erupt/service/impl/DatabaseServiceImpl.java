@@ -56,6 +56,13 @@ public class DatabaseServiceImpl implements DatabaseService {
     private static final int MAX_PAGE_SIZE = 100;
     private static final long MAX_OFFSET = 100_000L;
 
+    /** 深分页保护：LIMIT 的大 OFFSET 会扫描并丢弃大量行，直接拒绝超限请求。 */
+    private void requireOffsetWithinLimit(long offset) {
+        if (offset > MAX_OFFSET) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "分页偏移量过大，请缩小页码");
+        }
+    }
+
     private final DatabaseMapper databaseMapper;
 
     public DatabaseServiceImpl(DatabaseMapper databaseMapper) {
@@ -83,14 +90,13 @@ public class DatabaseServiceImpl implements DatabaseService {
     public PageResult<TableVO> listTables(String schema, String keyword, int page, int pageSize) {
         requireValidName(schema);
         PageParams params = normalizePage(page, pageSize);
+        // 偏移量校验放在 COUNT 之前：注定 400 的请求没理由先让库跑一次统计
+        long offset = (long) (params.page - 1) * params.pageSize;
+        requireOffsetWithinLimit(offset);
         String safeKeyword = LikeEscape.escape(keyword == null || keyword.isBlank() ? null : keyword.trim());
         long total = databaseMapper.countTables(schema, safeKeyword);
         if (total == 0) {
             return PageResult.of(List.of(), 0L, params.page, params.pageSize);
-        }
-        long offset = (long) (params.page - 1) * params.pageSize;
-        if (offset > MAX_OFFSET) {
-            throw new BusinessException(ResultCode.BAD_REQUEST, "分页偏移量过大，请缩小页码");
         }
         List<Map<String, Object>> rows = databaseMapper.selectTables(schema, safeKeyword, offset, params.pageSize);
         List<TableVO> items = new ArrayList<>(rows.size());
@@ -146,12 +152,12 @@ public class DatabaseServiceImpl implements DatabaseService {
         List<TableDataVO.ColumnMeta> columns = listColumns(schema, table);
         String columnListSql = buildColumnListSql(columns);
 
-        // 2) 行数与数据并行查：total 用于分页，data 用于当前页。
-        long total = databaseMapper.countTableData(schema, table);
+        // 2) 偏移量校验放在 COUNT 之前：任意用户表的精确 COUNT(*) 对 InnoDB 大表是全表扫描，
+        //    page=999999 这类注定 400 的请求没理由先让库白跑一趟
         long offset = (long) (params.page - 1) * params.pageSize;
-        if (offset > MAX_OFFSET) {
-            throw new BusinessException(ResultCode.BAD_REQUEST, "分页偏移量过大，请缩小页码");
-        }
+        requireOffsetWithinLimit(offset);
+        // 3) 行数与数据并行查：total 用于分页，data 用于当前页。
+        long total = databaseMapper.countTableData(schema, table);
         List<Map<String, Object>> rawRows = total == 0
                 ? List.of()
                 : databaseMapper.selectTableData(schema, table, columnListSql, offset, params.pageSize);

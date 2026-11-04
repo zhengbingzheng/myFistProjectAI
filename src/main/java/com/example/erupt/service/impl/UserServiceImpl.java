@@ -177,6 +177,8 @@ public class UserServiceImpl implements UserService {
         // 软删除必须留下操作人：删除他人是高敏操作，事后要能追溯到具体账号
         int affected = userMapper.softDeleteById(id, AuthContext.currentUsername(), LocalDateTime.now());
         if (affected >= 1) {
+            // 删除后立即吊销该用户全部会话：账号都没了，Token 不能再活到 TTL
+            tokenService.revokeAllForUser(id);
             log.info("软删除用户成功，id={}, affected={}", id, affected);
             return Result.success(null, "删除成功");
         }

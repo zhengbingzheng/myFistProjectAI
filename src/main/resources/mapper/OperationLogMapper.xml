@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.erupt.repository.mapper.OperationLogMapper">
+
+    <sql id="Condition_Where">
+        <where>
+            <if test="keyword != null and keyword != ''">
+                AND (request_uri LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/'
+                OR operator_name LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/'
+                OR operator_ip LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/'
+                OR trace_id LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/')
+            </if>
+            <if test="module != null and module != ''">AND module = #{module}</if>
+            <if test="operation != null and operation != ''">AND operation = #{operation}</if>
+            <if test="result != null">AND result = #{result}</if>
+            <if test="startTime != null">AND create_time &gt;= #{startTime}</if>
+            <if test="endTime != null">AND create_time &lt;= #{endTime}</if>
+        </where>
+    </sql>
+
+    <!-- 日志只增不改，insert 不返回主键：id 由应用层生成后随实体一起写入 -->
+    <insert id="insert">
+        INSERT INTO t_operation_log
+            (id, module, operation, request_method, request_uri, query_string,
+             operator_id, operator_name, operator_ip, result, status_code, cost_ms,
+             trace_id, create_time)
+        VALUES
+            (#{id}, #{module}, #{operation}, #{requestMethod}, #{requestUri}, #{queryString},
+             #{operatorId}, #{operatorName}, #{operatorIp}, #{result}, #{statusCode}, #{costMs},
+             #{traceId}, NOW())
+    </insert>
+
+    <select id="selectByCondition" resultType="com.example.erupt.repository.entity.OperationLog">
+        SELECT id, module, operation, request_method AS requestMethod, request_uri AS requestUri,
+               query_string AS queryString, operator_id AS operatorId, operator_name AS operatorName,
+               operator_ip AS operatorIp, result, status_code AS statusCode, cost_ms AS costMs,
+               trace_id AS traceId, create_time AS createTime
+        FROM t_operation_log
+        <include refid="Condition_Where"/>
+        ORDER BY create_time DESC, id DESC
+        LIMIT #{offset}, #{limit}
+    </select>
+
+    <select id="countByCondition" resultType="long">
+        SELECT COUNT(*)
+        FROM t_operation_log
+        <include refid="Condition_Where"/>
+    </select>
+
+</mapper>

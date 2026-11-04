@@ -21,6 +21,7 @@ import com.example.erupt.service.ChatService;
 import com.example.erupt.websocket.ChatSessionRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -95,6 +96,11 @@ public class ChatServiceImpl implements ChatService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public ConversationVO getOrCreateConversation(String userId, String targetUserId) {
+        // 自聊会话能通过 uk_biz_key（key 由自己与自己拼成），却会在第二次 insertMember
+        // 撞 uk_conv_user，报出来的 409"数据已存在"完全对不上病因——入口处直接拦下
+        if (userId.equals(targetUserId)) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "不能与自己建立会话");
+        }
         var target = userMapper.selectById(targetUserId);
         if (target == null) {
             throw new BusinessException(ResultCode.NOT_FOUND, "用户不存在");
@@ -111,11 +117,23 @@ public class ChatServiceImpl implements ChatService {
         conv.setBizKey(bizKey);
         conv.setOwnerId(userId);
         conv.setDelFlag("0");
-        chatMapper.insertConversation(conv);
+        try {
+            requireAffected(chatMapper.insertConversation(conv), "会话创建失败");
+        } catch (DuplicateKeyException e) {
+            // uk_biz_key 兜底了"A、B 同时互发"的并发建会话：对方的事务已经建好，
+            // 复用它即可。不接住的话用户会收到一句对不上病因的 409"数据已存在"。
+            // 必须用 FOR UPDATE 的当前读：本事务的读视图建立于对手方提交之前，
+            // 普通 SELECT 在 REPEATABLE READ 下看不到那行，兜底会永远落空
+            ChatConversation winner = chatMapper.selectConversationByBizKeyForUpdate(bizKey);
+            if (winner == null) {
+                throw e;
+            }
+            return toConversationVO(winner, userId);
+        }
 
         LocalDateTime now = LocalDateTime.now();
-        chatMapper.insertMember(member(convId, userId, 1));
-        chatMapper.insertMember(member(convId, targetUserId, 1));
+        requireAffected(chatMapper.insertMember(member(convId, userId, 1)), "会话成员写入失败");
+        requireAffected(chatMapper.insertMember(member(convId, targetUserId, 1)), "会话成员写入失败");
 
         var created = chatMapper.selectConversationById(convId);
         return toConversationVO(created, userId);
@@ -148,8 +166,13 @@ public class ChatServiceImpl implements ChatService {
                     userId.equals(str(row.get("senderId"))),
                     attachmentOf(row)));
         }
-        items.sort(Comparator.comparing(MessageVO::createTime,
-                Comparator.nullsFirst(Comparator.naturalOrder())));
+        // 次序键要带上 id：create_time 是秒级精度，同一秒内连续发送的消息若只按
+        // createTime 排，稳定排序会保留 SQL 页内的 id 倒序——后发的反而排在前面。
+        // 加 id 作次序键后与 SQL 的 (create_time, id) 序完全对应，整页顺序确定
+        Comparator<MessageVO> order = Comparator.comparing(MessageVO::createTime,
+                        Comparator.nullsFirst(Comparator.naturalOrder()))
+                .thenComparing(MessageVO::id, Comparator.nullsFirst(Comparator.naturalOrder()));
+        items.sort(order);
         return PageResult.of(items, total, safePage, safeSize);
     }
 
@@ -162,7 +185,12 @@ public class ChatServiceImpl implements ChatService {
         ChatAttachmentVO attachment = attachmentId == null ? null : requireAttachment(attachmentId, senderId);
         String text = blankToNull(request.content());
 
-        int msgType = request.msgType() == null ? inferMsgType(attachment) : request.msgType();
+        Integer requestedType = request.msgType();
+        // msgType 直接落库且参与会话列表预览渲染，任意整数会产生"永远显示空白"的脏消息
+        if (requestedType != null && (requestedType < TYPE_TEXT || requestedType > TYPE_FILE)) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "消息类型取值需为 1~3");
+        }
+        int msgType = requestedType == null ? inferMsgType(attachment) : requestedType;
 
         // 先判"声明了类型却没给对应内容"，提示才说得具体。
         // 若反过来先判"空消息"，前端声明 msgType=2 却忘了附件时只会得到
@@ -189,13 +217,13 @@ public class ChatServiceImpl implements ChatService {
         message.setAttachmentId(attachmentId);
         message.setReadFlag(0);
         message.setDelFlag("0");
-        chatMapper.insertMessage(message);
+        requireAffected(chatMapper.insertMessage(message), "消息写入失败");
 
         LocalDateTime now = LocalDateTime.now();
-        chatMapper.updateConversationLastMsg(conversationId, message.getId(), now);
+        requireAffected(chatMapper.updateConversationLastMsg(conversationId, message.getId(), now), "会话摘要更新失败");
         String receiverId = message.getReceiverId();
         if (receiverId != null) {
-            chatMapper.incrMemberUnread(conversationId, receiverId);
+            requireAffected(chatMapper.incrMemberUnread(conversationId, receiverId), "未读计数更新失败");
         }
 
         // 事务提交后再推：把推送动作挂到当前事务的 afterCommit 回调上
@@ -210,8 +238,10 @@ public class ChatServiceImpl implements ChatService {
     public int markRead(String userId, String conversationId) {
         requireMember(userId, conversationId);
         int updated = chatMapper.markMessagesRead(conversationId, userId);
-        chatMapper.clearMemberUnread(conversationId, userId, null);
         if (updated > 0) {
+            // 按实际标记的行数扣减未读，而不是无条件清零——
+            // 等行锁期间新到的消息已经 +1，清零会把它的未读一起抹掉
+            chatMapper.clearMemberUnread(conversationId, userId, updated);
             afterCommit(() -> pushUnread(userId));
         }
         return updated;
@@ -362,10 +392,13 @@ public class ChatServiceImpl implements ChatService {
         if (userId.equals(attachment.getUploaderId())) {
             return;
         }
-        String conversationId = chatMapper.selectConversationIdByAttachment(attachmentId);
+        // 直接按"请求者是否为某条引用会话的成员"判定：
+        // 同一附件可被发到多个会话，先任取一条引用会话再判成员，
+        // 无序 LIMIT 1 会把另一条会话里的合法成员误拒（时通时拒）
+        String conversationId = chatMapper.selectReadableConversationId(attachmentId, userId);
         if (conversationId == null) {
             // 尚未发送的附件，除上传者外不对外开放
-            throw new BusinessException(ResultCode.NOT_FOUND, "附件尚未发送");
+            throw new BusinessException(ResultCode.NOT_FOUND, "附件尚未发送或无权访问");
         }
         requireMember(userId, conversationId);
     }
@@ -519,6 +552,14 @@ public class ChatServiceImpl implements ChatService {
 
     private static String newId() {
         return UUID.randomUUID().toString().replace("-", "");
+    }
+
+    /** 项目约定：写操作校验受影响行数，不符即失败回滚，不返回"部分成功" */
+    private static void requireAffected(int affected, String message) {
+        if (affected != 1) {
+            log.warn("{} affected={}", message, affected);
+            throw new BusinessException(ResultCode.INTERNAL_ERROR, message);
+        }
     }
 
     private static String str(Object value) {

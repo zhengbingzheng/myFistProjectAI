@@ -6,10 +6,13 @@ import org.slf4j.LoggerFactory;
 import org.springframework.context.MessageSourceResolvable;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.FieldError;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -17,6 +20,7 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.multipart.MultipartException;
 import org.springframework.web.multipart.support.MissingServletRequestPartException;
 
 import java.util.Objects;
@@ -52,9 +56,6 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * @RequestBody 校验失败（DTO 内部约束）。
-     */
-    /**
      * 找不到任何处理器时（多数是请求了不存在的路径）返回 404。
      *
      * <p>Spring 会先按静态资源尝试解析，失败后抛 {@link NoResourceFoundException}。
@@ -69,8 +70,15 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<Result<Void>> handleValidException(MethodArgumentNotValidException ex) {
-        String message = ex.getBindingResult().getFieldErrors().stream()
-                .map(fieldError -> fieldError.getField() + ": " + fieldError.getDefaultMessage())
+        // 类级约束（@ScriptAssert 等）的错误不在 FieldErrors 里，一并收集，
+        // 否则校验明明失败了却只剩兜底文案，查不出是哪条规则没过
+        String message = ex.getBindingResult().getAllErrors().stream()
+                .map(error -> {
+                    if (error instanceof FieldError fieldError) {
+                        return fieldError.getField() + ": " + fieldError.getDefaultMessage();
+                    }
+                    return error.getDefaultMessage();
+                })
                 .collect(Collectors.joining(", "));
         return badRequest(ResultCode.BAD_REQUEST, defaultIfBlank(message, "请求参数校验失败"));
     }
@@ -129,6 +137,19 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * 其余数据完整性冲突（数据超长、非空约束、CHECK 失败等）。
+     *
+     * <p>不接住会落进兜底变 500 并污染 ERROR 告警，实际是调用方数据不合法。
+     * Spring 会优先命中上面更具体的 {@link DuplicateKeyException} 子类分支，409 语义不受影响。</p>
+     */
+    @ExceptionHandler(org.springframework.dao.DataIntegrityViolationException.class)
+    public ResponseEntity<Result<Void>> handleDataIntegrityViolation(
+            org.springframework.dao.DataIntegrityViolationException ex) {
+        log.warn("数据完整性冲突：{}", ex.getRootCause() != null ? ex.getRootCause().getMessage() : ex.getMessage());
+        return badRequest(ResultCode.BAD_REQUEST, "数据不合法，违反完整性约束");
+    }
+
+    /**
      * 附件上传超过容器层限制（spring.servlet.multipart）。
      */
     @ExceptionHandler(MaxUploadSizeExceededException.class)
@@ -144,6 +165,40 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Result<Void>> handleMissingServletRequestPartException(MissingServletRequestPartException ex) {
         log.warn("上传请求缺少文件字段：{}", ex.getRequestPartName());
         return badRequest(ResultCode.BAD_REQUEST, "缺少上传文件字段：" + ex.getRequestPartName());
+    }
+
+    /**
+     * 必填的 @RequestParam / @PathVariable 缺失。
+     *
+     * <p>不接住会落进兜底变成 500——真实触发点如 {@code POST /api/auth/logout-via-param}
+     * 的必填 {@code token} 参数缺失，调用方拿到"服务内部异常"，且污染 ERROR 告警日志。</p>
+     */
+    @ExceptionHandler(MissingServletRequestParameterException.class)
+    public ResponseEntity<Result<Void>> handleMissingParameter(MissingServletRequestParameterException ex) {
+        log.warn("缺少必填参数：{}", ex.getParameterName());
+        return badRequest(ResultCode.BAD_REQUEST, "缺少必填参数：" + ex.getParameterName());
+    }
+
+    /**
+     * Content-Type 与接口期望不符，例如对 @RequestBody JSON 端点提交表单。
+     * 信封 code 与 HTTP 状态同为 415，与其余错误一一对应的口径保持一致。
+     */
+    @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
+    public ResponseEntity<Result<Void>> handleMediaTypeNotSupported(HttpMediaTypeNotSupportedException ex) {
+        log.warn("媒体类型不支持：{}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.UNSUPPORTED_MEDIA_TYPE)
+                .body(Result.failure(ResultCode.UNSUPPORTED_MEDIA_TYPE,
+                        "Content-Type 不被支持：" + ex.getContentType()));
+    }
+
+    /**
+     * 其余 multipart 异常（非尺寸类，如请求不是 multipart 却上传）。
+     * 放在 MaxUploadSizeExceededException 之后，更具体的子类优先命中。
+     */
+    @ExceptionHandler(MultipartException.class)
+    public ResponseEntity<Result<Void>> handleMultipartException(MultipartException ex) {
+        log.warn("multipart 请求非法：{}", ex.getMessage());
+        return badRequest(ResultCode.BAD_REQUEST, "上传请求非法，请使用 multipart/form-data 提交");
     }
 
     /**

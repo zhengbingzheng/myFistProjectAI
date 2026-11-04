@@ -209,6 +209,16 @@
         WHERE del_flag = '1'
     </select>
 
+    <!-- 清空回收站的分批通道：按删除时间倒序取一批，循环调用直到返回空 -->
+    <select id="selectRecycledBatch" resultMap="BaseResultMap">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM t_attachment
+        WHERE del_flag = '1'
+        ORDER BY delete_time DESC, id DESC
+        LIMIT #{limit}
+    </select>
+
     <!--
       物理删除。保留 del_flag = '1' 这个前提，是"删除必须先过回收站"的最后一道防线：
       即使上层校验被绕过，正常状态的附件也不会被直接 DELETE 掉。

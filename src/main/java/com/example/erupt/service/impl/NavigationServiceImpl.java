@@ -187,8 +187,14 @@ public class NavigationServiceImpl implements NavigationService {
             log.info("删除导航成功，id={}, affected={}", id, affected);
             return Result.success(null, "删除成功");
         }
+        // 先查后删的间隙被并发请求删掉时，把"已不存在"报成 500 内部错误有误导性，复核一次。
+        // 用抛异常而不是 Result.failure：后者是 HTTP 200 + 信封 404，
+        // 与 requireNavigation 抛出的 HTTP 404 两种契约并存，前端按状态码判定会误判成败
+        if (navigationMapper.selectById(id) == null) {
+            throw new BusinessException(ResultCode.NOT_FOUND, "导航不存在");
+        }
         log.warn("删除导航失败，id={}, affected={}", id, affected);
-        return Result.failure(ResultCode.INTERNAL_ERROR, "删除失败");
+        throw new BusinessException(ResultCode.INTERNAL_ERROR, "删除失败");
     }
 
     @Override
@@ -424,12 +430,16 @@ public class NavigationServiceImpl implements NavigationService {
             throw new BusinessException(ResultCode.NOT_FOUND, "待删除的记录中包含不存在的数据，未执行删除");
         }
         int affected = navigationMapper.deleteByIds(distinctIds);
-        if (affected >= 1) {
-            log.info("批量删除导航成功，ids={}, affected={}", distinctIds, affected);
-            return Result.success(null, "批量删除成功，共删除 " + affected + " 条");
+        if (affected != distinctIds.size()) {
+            // count-then-delete 之间记录可能被并发单删：实际行数不足即整批失败并回滚
+            // （事务已具备 rollbackFor），不会产生静默的部分删除
+            log.warn("批量删除导航失败：预期 {} 条，实际 {} 条，ids={}，事务将回滚",
+                    distinctIds.size(), affected, distinctIds);
+            throw new BusinessException(ResultCode.NOT_FOUND,
+                    "待删除的记录中包含不存在的数据，未执行删除");
         }
-        log.warn("批量删除导航失败，ids={}, affected={}", distinctIds, affected);
-        return Result.failure(ResultCode.INTERNAL_ERROR, "批量删除失败");
+        log.info("批量删除导航成功，ids={}, affected={}", distinctIds, affected);
+        return Result.success(null, "批量删除成功，共删除 " + affected + " 条");
     }
 
     /** 批量删除入参校验：非空、数量上限、剔除 null 并去重。 */

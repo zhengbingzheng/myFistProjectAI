@@ -8,6 +8,7 @@ import com.example.erupt.model.vo.MenuVO;
 import com.example.erupt.model.vo.RoleVO;
 import com.example.erupt.service.MenuService;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
@@ -87,14 +88,15 @@ public class MenuController {
 
     @PostMapping("/roles")
     public ResponseEntity<Result<RoleVO>> createRole(@Valid @RequestBody RoleRequest request) {
-        RoleVO created = menuService.createRole(request, AuthContext.currentUsername());
+        RoleVO created = menuService.createRole(request, AuthContext.currentUserId(), AuthContext.currentUsername());
         return ResponseEntity.status(HttpStatus.CREATED).body(Result.success(created));
     }
 
     @PutMapping("/roles/{id}")
     public ResponseEntity<Result<RoleVO>> updateRole(@PathVariable String id,
                                                      @Valid @RequestBody RoleRequest request) {
-        return ResponseEntity.ok(Result.success(menuService.updateRole(id, request)));
+        return ResponseEntity.ok(Result.success(
+                menuService.updateRole(id, request, AuthContext.currentUserId(), AuthContext.currentUsername())));
     }
 
     @DeleteMapping("/roles/{id}")
@@ -109,10 +111,11 @@ public class MenuController {
         return ResponseEntity.ok(Result.success(menuService.menuIdsOfRole(roleId)));
     }
 
-    /** 给角色授权菜单（全量覆盖） */
+    /** 给角色授权菜单（全量覆盖）。空数组表示清空授权；null 请求体则直接 400 */
     @PostMapping("/roles/{roleId}/menus")
-    public ResponseEntity<Result<Integer>> grantRoleMenus(@PathVariable String roleId,
-                                                          @RequestBody List<String> menuIds) {
+    public ResponseEntity<Result<Integer>> grantRoleMenus(
+            @PathVariable String roleId,
+            @Valid @NotNull(message = "菜单ID列表不能为 null") @RequestBody List<String> menuIds) {
         int count = menuService.grantMenusToRole(roleId, menuIds, AuthContext.currentUsername());
         return ResponseEntity.ok(Result.success(count));
     }

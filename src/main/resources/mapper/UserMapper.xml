@@ -42,9 +42,9 @@
 
     <insert id="insert" parameterType="com.example.erupt.repository.entity.User">
         INSERT INTO t_user (id, username, password, nickname, avatar, email, phone, status, remark,
-                            create_by, create_time, update_time, del_flag)
+                            create_by, update_by, create_time, update_time, del_flag)
         VALUES (#{id}, #{username}, #{password}, #{nickname}, #{avatar}, #{email}, #{phone}, #{status}, #{remark},
-                #{createBy}, #{createTime}, #{updateTime}, #{delFlag})
+                #{createBy}, #{updateBy}, #{createTime}, #{updateTime}, #{delFlag})
     </insert>
 
     <select id="selectById" resultMap="BaseResultMap" parameterType="java.lang.String">

@@ -124,6 +124,14 @@ public interface AttachmentMapper {
     List<Attachment> selectAllRecycled();
 
     /**
+     * 按删除时间倒序分批取回收站记录（清空回收站的分批通道）。
+     * 一次性载入全部回收站会在积压数万条时同时顶到内存与 JDBC 占位符上限（65535）。
+     *
+     * @param limit 单批条数；循环调用直到返回空列表
+     */
+    List<Attachment> selectRecycledBatch(@Param("limit") int limit);
+
+    /**
      * 物理删除回收站中的记录。
      *
      * <p>带 {@code del_flag = '1'} 前提条件是最后一道防线：即便上层逻辑出错，

@@ -151,8 +151,8 @@ class DatabaseServiceImplTest {
     @Test
     @DisplayName("listTables_偏移量超限_抛BAD_REQUEST")
     void listTables_overflowOffset() {
-        when(databaseMapper.countTables(eq("erupt-example"), any())).thenReturn(1L);
         // page=200000, pageSize=1 → offset=199999 > MAX_OFFSET(100000)
+        // 偏移量校验在 COUNT 之前：注定 400 的请求不再让库白跑一次统计，故不打 countTables 桩
         BusinessException ex = catchThrowableOfType(
                 () -> service.listTables("erupt-example", null, 200_000, 1), BusinessException.class);
         assertThat(ex.resultCode()).isEqualTo(ResultCode.BAD_REQUEST);

@@ -13,6 +13,7 @@ public record KnowledgeUpdateRequest(
         @Size(max = 255, message = "标题不能超过 255 个字符")
         String name,
 
+        @Size(max = 1_000_000, message = "正文不能超过 100 万个字符")
         String content,
 
         @Size(max = 255, message = "类型不能超过 255 个字符")

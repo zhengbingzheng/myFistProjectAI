@@ -19,9 +19,12 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
+import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.ByteArrayOutputStream;
@@ -69,7 +72,8 @@ class AttachmentServiceImplTest {
         properties.setStorageDir(tempDir.toString());
         properties.setMaxUploadSizeKb(1024);
         properties.setZipMaxTotalSizeKb(1024);
-        attachmentService = new AttachmentServiceImpl(attachmentMapper, properties);
+        attachmentService = new AttachmentServiceImpl(attachmentMapper, properties,
+                new TransactionTemplate(Mockito.mock(PlatformTransactionManager.class)));
         stubWriteDefaults();
     }
 
@@ -953,7 +957,7 @@ class AttachmentServiceImplTest {
     @Test
     @DisplayName("emptyRecycle_emptyBin_skipsDelete")
     void emptyRecycle_emptyBin_skipsDelete() {
-        when(attachmentMapper.selectAllRecycled()).thenReturn(List.of());
+        when(attachmentMapper.selectRecycledBatch(500)).thenReturn(List.of());
 
         attachmentService.emptyRecycle();
 
@@ -966,7 +970,7 @@ class AttachmentServiceImplTest {
     void emptyRecycle_withItems_deletesRecordsAndFiles() throws IOException {
         Attachment deleted = mockAttachment("id-1", "a.txt", 10L);
         deleted.setDelFlag("1");
-        when(attachmentMapper.selectAllRecycled()).thenReturn(List.of(deleted));
+        when(attachmentMapper.selectRecycledBatch(500)).thenReturn(List.of(deleted), List.of());
         Path file = tempDir.resolve(deleted.getStoragePath());
 
         attachmentService.emptyRecycle();
@@ -1004,7 +1008,7 @@ class AttachmentServiceImplTest {
                 () -> attachmentService.restore("id-1"), BusinessException.class);
 
         // 状态校验通过但数据库并未改动（多半是被并发改过），必须判定失败而非静默成功
-        assertThat(ex.resultCode()).isEqualTo(ResultCode.INTERNAL_ERROR);
+        assertThat(ex.resultCode()).isEqualTo(ResultCode.CONFLICT);
     }
 
     @Test
@@ -1019,7 +1023,7 @@ class AttachmentServiceImplTest {
         BusinessException ex = catchThrowableOfType(
                 () -> attachmentService.moveToRecycle("id-1"), BusinessException.class);
 
-        assertThat(ex.resultCode()).isEqualTo(ResultCode.INTERNAL_ERROR);
+        assertThat(ex.resultCode()).isEqualTo(ResultCode.CONFLICT);
     }
 
     @Test
@@ -1034,7 +1038,7 @@ class AttachmentServiceImplTest {
         BusinessException ex = catchThrowableOfType(
                 () -> attachmentService.moveToRecycleBatch(List.of("id-1", "id-2")), BusinessException.class);
 
-        assertThat(ex.resultCode()).isEqualTo(ResultCode.INTERNAL_ERROR);
+        assertThat(ex.resultCode()).isEqualTo(ResultCode.CONFLICT);
     }
 
     @Test
@@ -1049,7 +1053,7 @@ class AttachmentServiceImplTest {
         BusinessException ex = catchThrowableOfType(
                 () -> attachmentService.purge("id-1"), BusinessException.class);
 
-        assertThat(ex.resultCode()).isEqualTo(ResultCode.INTERNAL_ERROR);
+        assertThat(ex.resultCode()).isEqualTo(ResultCode.CONFLICT);
         // 最关键的断言：记录没删掉就绝不能删文件。
         // 否则会留下「记录还在、文件没了」的不一致，既查不出也自愈不了。
         assertThat(Files.exists(file)).isTrue();
@@ -1071,7 +1075,7 @@ class AttachmentServiceImplTest {
         BusinessException ex = catchThrowableOfType(
                 () -> attachmentService.purgeBatch(List.of("id-1", "id-2")), BusinessException.class);
 
-        assertThat(ex.resultCode()).isEqualTo(ResultCode.INTERNAL_ERROR);
+        assertThat(ex.resultCode()).isEqualTo(ResultCode.CONFLICT);
     }
 
     @Test
@@ -1079,7 +1083,7 @@ class AttachmentServiceImplTest {
     void emptyRecycle_returnsActualAffectedCount() throws IOException {
         Attachment deleted = mockAttachment("id-1", "a.txt", 10L);
         deleted.setDelFlag("1");
-        when(attachmentMapper.selectAllRecycled()).thenReturn(List.of(deleted));
+        when(attachmentMapper.selectRecycledBatch(500)).thenReturn(List.of(deleted), List.of());
 
         int affected = attachmentService.emptyRecycle();
 

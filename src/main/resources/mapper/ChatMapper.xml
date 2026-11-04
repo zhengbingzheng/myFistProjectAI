@@ -25,6 +25,19 @@
         LIMIT 1
     </select>
 
+    <!-- 当前读：并发建会话兜底专用，必须能看到对手方已提交的行，理由见 Mapper 接口注释 -->
+    <select id="selectConversationByBizKeyForUpdate" resultType="com.example.erupt.repository.entity.ChatConversation">
+        SELECT id, conv_type AS convType, biz_key AS bizKey, conv_name AS convName,
+               conv_avatar AS convAvatar, owner_id AS ownerId,
+               last_msg_id AS lastMsgId, last_msg_time AS lastMsgTime,
+               del_flag AS delFlag, create_by AS createBy, update_by AS updateBy,
+               create_time AS createTime, update_time AS updateTime
+        FROM t_chat_conversation
+        WHERE biz_key = #{bizKey} AND del_flag = '0'
+        LIMIT 1
+        FOR UPDATE
+    </select>
+
     <select id="selectConversationById" resultType="com.example.erupt.repository.entity.ChatConversation">
         SELECT id, conv_type AS convType, biz_key AS bizKey, conv_name AS convName,
                conv_avatar AS convAvatar, owner_id AS ownerId,
@@ -117,10 +130,13 @@
           AND del_flag = '0'
     </update>
 
+    <!--
+      按本次标记已读的行数扣减，而不是 SET 0：
+      markRead 在等消息行锁期间可能恰好有新消息把计数 +1，无条件清零会把它抹掉。
+    -->
     <update id="clearMemberUnread">
         UPDATE t_chat_member
-        SET unread_count    = 0,
-            last_read_msg_id = #{lastReadMsgId}
+        SET unread_count = GREATEST(unread_count - #{readCount}, 0)
         WHERE conversation_id = #{conversationId}
           AND user_id = #{userId}
           AND del_flag = '0'
@@ -212,14 +228,17 @@
 
 
     <!--
-      该附件被哪条消息引用：用于下载鉴权。
-      只有引用它的会话成员才能读文件，避免“登录了就能凭 id 遍历全部附件”。
+      请求者能否通过「引用了该附件的会话成员」这条路径读取附件：
+      直接按请求者的成员关系 JOIN 过滤，而不是任取一条引用会话再判成员——
+      同一附件可被发到多个会话，无序 LIMIT 1 会把合法成员误拒（时通时拒）。
     -->
-    <select id="selectConversationIdByAttachment" resultType="java.lang.String">
-        SELECT conversation_id
-        FROM t_chat_message
-        WHERE attachment_id = #{attachmentId}
-          AND del_flag = '0'
+    <select id="selectReadableConversationId" resultType="java.lang.String">
+        SELECT m.conversation_id
+        FROM t_chat_message m
+                 JOIN t_chat_member mem ON mem.conversation_id = m.conversation_id
+            AND mem.user_id = #{userId} AND mem.del_flag = '0'
+        WHERE m.attachment_id = #{attachmentId}
+          AND m.del_flag = '0'
         LIMIT 1
     </select>
 </mapper>

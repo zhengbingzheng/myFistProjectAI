@@ -1,5 +1,7 @@
 package com.example.erupt.model.dto;
 
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 
@@ -26,6 +28,8 @@ public record MenuRequest(
         String menuCode,
 
         /** 类型：1 目录，2 菜单，3 按钮 */
+        @Min(value = 1, message = "菜单类型取值需为 1~3")
+        @Max(value = 3, message = "菜单类型取值需为 1~3")
         Integer menuType,
 
         @Size(max = 255, message = "路由地址不能超过 255 个字符")
@@ -40,6 +44,8 @@ public record MenuRequest(
         Integer sortNum,
 
         /** 是否显示：0 隐藏，1 显示 */
+        @Min(value = 0, message = "显示标记取值需为 0 或 1")
+        @Max(value = 1, message = "显示标记取值需为 0 或 1")
         Integer visible,
 
         @Size(max = 128, message = "权限标识不能超过 128 个字符")

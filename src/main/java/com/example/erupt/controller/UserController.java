@@ -147,7 +147,10 @@ public class UserController {
     @PostMapping("/{id}/roles")
     public ResponseEntity<Result<Integer>> grantUserRoles(@PathVariable String id,
                                                           @RequestBody List<String> roleIds) {
-        int count = menuService.grantRolesToUser(id, roleIds, AuthContext.currentUsername());
+        // operatorId 用于角色等级越权校验（不能分配比自己等级更高的角色），
+        // operator 仅作审计字段
+        int count = menuService.grantRolesToUser(id, roleIds,
+                AuthContext.currentUserId(), AuthContext.currentUsername());
         return ResponseEntity.ok(Result.success(count));
     }
 }

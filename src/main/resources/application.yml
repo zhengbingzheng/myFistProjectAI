@@ -89,8 +89,10 @@ app:
     # 验证码有效期
     captcha-ttl: ${AUTH_CAPTCHA_TTL:2m}
     # 是否强制每次登录都要验证码。默认 false：
-    # 连续失败 2 次后自动要求输入验证码，做到"正常用户无感、攻击者受限"
+    # 连续失败后自动要求输入验证码，做到"正常用户无感、攻击者受限"
     captcha-required: ${AUTH_CAPTCHA_REQUIRED:false}
+    # 连续失败达到该次数后要求验证码（与 login-max-failures 相互独立）
+    captcha-threshold: ${AUTH_CAPTCHA_THRESHOLD:2}
     # 鉴权总开关。设为 false 时所有接口放行，仅用于本地联调，切勿在生产开启
     enabled: ${AUTH_ENABLED:true}
 
