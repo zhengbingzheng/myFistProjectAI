@@ -37,6 +37,10 @@
 
 ## 目录结构
 
+> 下面是最早只有用户模块时的骨架，用于说明分层怎么落位。后续按模块横向扩展
+> （`controller/`、`service/impl/`、`mapper/` 下每个业务一组文件，`config/` 下是鉴权、菜单权限、
+> 日志、链路追踪等横切组件），完整清单见各模块章节末尾的「文件清单」。
+
 ```
 src/main/java/com/example/erupt/
 ├── EruptExampleApplication.java         # 启动入口
@@ -64,10 +68,21 @@ src/main/resources/
 
 ## 快速开始
 
-1. 初始化数据库：
+1. 初始化数据库（按顺序执行，均需带字符集，否则中文入库成乱码）：
+
+| 顺序 | 脚本 | 内容 | 是否必需 |
+|---|---|---|---|
+| 1 | `db/schema.sql` | 建库 + 用户 / 知识库 / 导航等基础表 + 初始账号 | 必需 |
+| 2 | `db/schema-im-menu.sql` | 即时通信三张表 + 菜单 / 角色 / 关联表 | 必需 |
+| 3 | `db/init-im-menu.sql` | 角色、菜单树、授权初始数据（会先清空 `t_menu`） | 必需 |
+| 4 | `db/schema-operation-log.sql` | 系统操作日志表 + 「系统日志」菜单（m21）及其超管授权 | 需要日志功能时 |
+| 5 | `db/migrate_knowledge_index.sql` | 知识库全文索引 `ft_knowledge_search` | 可选（关闭全文检索则不需要） |
+| 6 | `db/migrate_id_to_varchar32.sql` | 老库升级：`bigint` 主键转字符串并 `LPAD` 补零 | 仅从旧版本升级时 |
 
 ```bash
-mysql -uroot -p < src/main/resources/db/schema.sql
+for f in schema.sql schema-im-menu.sql init-im-menu.sql schema-operation-log.sql; do
+  mysql --default-character-set=utf8mb4 -uroot -p erupt-example < "src/main/resources/db/$f"
+done
 ```
 
 2. 确认配置（`src/main/resources/application.yml`）：
@@ -131,6 +146,28 @@ curl -X POST http://localhost:8080/api/users \
   -d '{"username":"admin01","password":"123456","nickname":"管理员","email":"a@b.com","phone":"13800138000"}'
 ```
 
+### 接口总览（按模块）
+
+全部接口都以 `/api` 开头，统一返回 `Result` 信封；分页接口的 `data` 为 `PageResult`。
+**共 11 个视图层、84 个端点**，明细见各模块章节：
+
+| 模块 | 前缀 | 端点数 | 视图层 | 菜单权限标识 | 说明 |
+|---|---|---|---|---|---|
+| 认证 | `/api/auth` | 7 | `AuthController` | 放行 | 登录、验证码、登出、WebSocket 票据、当前用户 |
+| 用户 | `/api/users` | 11 | `UserController` | `users` | 管理端增删改查 + 角色分配；`/me` 三个自助接口放行 |
+| 菜单与角色 | `/api/menu` | 11 | `MenuController` | `menu` | 菜单树、角色 CRUD、角色授权；`/mine` 放行 |
+| 数据字典 | `/api/dict` | 9 | `DictController` | `dict` | 类型 / 字典项两套 CRUD；**三个读接口放行** |
+| 知识库 | `/api/knowledge` | 7 | `KnowledgeController` | `knowledge` | 含批量删除、类型枚举 |
+| 导航 | `/api/navigation` | 10 | `NavigationController` | `navigation` | 含批量删除、导入 / 导出、分类 |
+| 附件 | `/api/attachments` | 14 | `AttachmentController` | `attachments` | 上传、预览、打包下载、回收站两级删除 |
+| 数据库浏览 | `/api/databases` | 4 | `DatabaseController` | `databases` | 只读，走 `information_schema` |
+| 即时通信 | `/api/chat` | 8 | `ChatController` | 放行 | 会话、消息、未读、可聊对象 |
+| 聊天附件 | `/api/chat/attachments` | 2 | `ChatAttachmentController` | 放行 | 独立存储，不复用 `t_attachment` |
+| 系统日志 | `/api/logs` | 1 | `OperationLogController` | `logs` | 只读审计查询，无写接口 |
+
+> 「放行」指不参与菜单授权：`AuthInterceptor` 的匿名白名单只有 3 个（登录 / 登录前置 / 验证码），
+> 其余放行都是 `MenuAccessInterceptor` 里的路径规则，见「菜单与授权模块 › 双层防线」。
+
 ## 认证模块（t_user + Redis 会话）
 
 所有 `/api/**` 请求默认受 `AuthInterceptor` 保护，凭证统一走 `Authorization: Bearer <token>` 请求头。
@@ -145,6 +182,7 @@ curl -X POST http://localhost:8080/api/users \
 | GET | `/api/auth/captcha` | 匿名 | 获取图形验证码 |
 | GET | `/api/auth/login-hint` | 匿名 | 查询登录前置状态：是否需要验证码、账号是否被锁定 |
 | POST | `/api/auth/login` | 匿名 | 登录，签发 Token |
+| GET | `/api/auth/ws-ticket` | 需鉴权 | 为 WebSocket 握手签发**一次性**短期票据（60 秒、用后即焚） |
 | GET | `/api/auth/profile` | 需鉴权 | 当前登录用户信息 |
 | POST | `/api/auth/logout` | 需鉴权 | 退出登录，吊销服务端会话 |
 | POST | `/api/auth/logout-via-param` | 需鉴权 | 同上，改用 `token` 参数传凭证（兼容非标准 header 场景） |
@@ -298,6 +336,31 @@ curl -X POST http://localhost:8080/api/auth/logout \
 
 为无法设置请求头的场景（如部分第三方跳转、表单直提）提供的等价退出口，行为与 `/logout` 完全一致。
 
+### 7. GET /api/auth/ws-ticket — WebSocket 一次性票据
+
+无参数，需带有效 Token：
+
+```json
+{
+  "code": 200,
+  "message": "操作成功",
+  "data": { "ticket": "8f14e45fceea167a5a36dedd4bea2543" },
+  "timestamp": 1730000000000
+}
+```
+
+| 约定 | 值 |
+|---|---|
+| 有效期 | **60 秒** |
+| 使用次数 | **仅一次**（Redis `GETDEL` 原子读删，并发下也只会成功一次） |
+| 用途 | 建连时替代长期 Token：`ws://<host>/ws/chat?ticket=<ticket>` |
+| 存储 | Redis `auth:ws-ticket:<ticket>` → userId |
+
+**为什么需要它**：浏览器 WebSocket API 不允许自定义请求头，凭证只能挂在 URL 上、必然进访问日志与代理日志。
+长期 Token（默认 2 小时）一旦通过日志泄露，在剩余有效期内都能被重放；换成 60 秒且一次性的 ticket 之后，
+即使被抓到也基本已经失效。握手时若没有 `ticket`，服务端会回退接受 `token` / `access_token` 参数以兼容旧前端，
+新代码一律走 ticket。
+
 ### Token 与会话约定
 
 | 环节 | 实现 |
@@ -375,7 +438,7 @@ curl -X POST http://localhost:8080/api/auth/logout \
 | `knowledge_name` | `knowledgeName` | `name` |
 | `knowledge_content` | `knowledgeContent` | `content` |
 | `knowledge_type` | `knowledgeType` | `type` |
-| `create_user_id` / `update_user_id` | `createUserId` / `updateUserId` | 只读返回；**当前不自动填充**（`KnowledgeServiceImpl` 未写入这两个字段，新增/更新后库中保持 NULL） |
+| `create_user_id` / `update_user_id` | `createUserId` / `updateUserId` | 只读返回；**应用层自动填充**：新增写创建人、更新写更新人（均取 `AuthContext.currentUserId()`，存的是 `t_user.id`），与导航模块口径一致 |
 | `create_time` / `update_time` | `createTime` / `updateTime` | 应用层填充 |
 
 文件清单：
@@ -486,7 +549,7 @@ curl -X POST http://localhost:8080/api/navigation \
 | 配置键 | 默认值 | 说明 |
 |---|---|---|
 | `app.attachment.storage-dir` | `./uploads` | 文件存储根目录 |
-| `app.attachment.max-upload-size-kb` | `10240` | 单个文件上传上限（KB），0 表示不限制 |
+| `app.attachment.max-upload-size-kb` | `51200` | 单个文件上传上限（KB，即 50 MB），0 表示不限制 |
 | `app.attachment.zip-max-total-size-kb` | `51200` | 打包下载总大小阈值（KB） |
 
 超过打包阈值时返回 **400** `多个附件下载超大，不允许打包下载`，且判定发生在**打包之前**，不会产出残缺 ZIP。
@@ -696,9 +759,20 @@ curl 'http://localhost:8080/api/databases/erupt-example/tables/t_user/data?page=
 | POST | `/api/chat/attachments` | 上传聊天附件（图片或文件，`multipart`，字段 `file`） |
 | GET | `/api/chat/attachments/{id}` | 读取聊天附件（上传者本人或会话成员） |
 
-WebSocket 端点：`ws://<host>/ws/chat?token=<token>`。
+WebSocket 端点：`ws://<host>/ws/chat?ticket=<ticket>`。
 
-**为什么 token 走 URL 参数**：浏览器 WebSocket API 不允许自定义请求头，`Authorization` 头加不上去。这是无奈之举，也是本项目采用短 TTL Token 的原因之一——凭证会出现在访问日志中。
+建连流程是「先取票、再握手」：
+
+```
+GET /api/auth/ws-ticket   （带 Authorization: Bearer <token>）→ { ticket }
+        │
+        └─ new WebSocket('ws://<host>/ws/chat?ticket=' + ticket)
+```
+
+**为什么不是直接把 Token 拼在 URL 上**：浏览器 WebSocket API 不允许自定义请求头，`Authorization` 加不上去，
+凭证只能进查询串、必然落进访问日志与代理日志。长期 Token 泄露后可在剩余有效期内重放，
+因此改用 60 秒有效、只能用一次的 ticket（见「认证模块 › 7. ws-ticket」）。
+握手拦截器仍接受 `token` / `access_token` 参数，但那只是兼容旧前端的退路，新代码不应再使用。
 
 推送报文格式：
 
@@ -778,6 +852,9 @@ CREATE TABLE IF NOT EXISTS `t_chat_attachment` (
     KEY `idx_create_time` (`create_time`)
 ) COMMENT '聊天附件（与文件管理 t_attachment 相互独立）';
 ```
+
+> 上面是建表当时的原始 DDL（`schema-im-menu.sql` 里也是 32 位）。主键与引用列后来统一加宽到 `varchar(64)`，
+> 以实际库为准，见文末「约定说明」。
 
 配置项（`application.yml`）：
 
@@ -917,7 +994,17 @@ IllegalStateException: 聊天附件目录 /app/uploads/chat 位于文件管理�
 
 服务端拦截器依赖菜单表的 `permission` 字段与 URI 模块名对应：`/api/knowledge/xxx` → permission `knowledge`。**初始化数据时务必给业务菜单配上 permission**，未配置的模块对所有登录用户开放。
 
-放行的三类路径：认证相关、聊天（基础能力）、`/api/menu/mine`（获取自身菜单，对它鉴权会死锁）。
+放行的路径分四类，全部在 `MenuAccessInterceptor` 里逐条列举（前缀 / 精确路径 / 正则，不做宽泛匹配）：
+
+| 类别 | 路径 | 为什么放行 |
+|---|---|---|
+| 认证 | 前缀 `/api/auth/` | 未登录用户必须能登录 |
+| 聊天 | 前缀 `/api/chat/` | 所有登录用户的基础能力，不参与菜单授权 |
+| 自助与渲染前提 | 精确 `/api/menu/mine`、`/api/users/me`、`/api/users/me/password` | 取自己的菜单是渲染前提；看 / 改**自己的**资料是基础能力。纳入模块鉴权会形成死锁或功能死链 |
+| 只读共享数据 | `GET /api/dict/types`、`GET /api/dict/items`、`GET /api/dict/{dictType}/items` | 各业务页都要用字典把存储值翻成展示名。**只放行 GET**，字典的写操作仍受 `dict` 菜单保护 |
+
+未列出的模块一律按 URI 第二段校验，例如 `/api/logs` → `logs`、`/api/attachments/upload` → `attachments`；
+未授权即 403（`无权限访问该菜单`）。
 
 ### 接口
 
@@ -950,10 +1037,13 @@ IllegalStateException: 聊天附件目录 /app/uploads/chat 位于文件管理�
 | 项 | 内容 |
 |---|---|
 | 角色 | `ROLE_SUPER_ADMIN`（等级 0）、`ROLE_USER`（等级 10） |
-| 菜单树 | 19 个节点，覆盖概览 / 知识库 / 导航 / 文件 / 数据库 / 接口文档 / 即时通信 / 系统管理 |
-| 授权 | 超级管理员授权全部 19 项；普通用户仅 4 项（概览、知识库、即时通信） |
+| 菜单树 | 20 个节点（`m01`~`m20`），覆盖概览 / 知识库 / 导航 / 文件 / 数据库 / 接口文档 / 即时通信 / 系统管理 |
+| 授权 | 超级管理员授权全部 20 项；普通用户仅 4 项（概览、知识库、即时通信） |
 
-验证效果（实测）：超级管理员可见 19 项，普通用户仅 4 项；普通用户访问 `/api/knowledge` 放行、访问 `/api/databases` 或 `/api/menu/tree` 返回 403。
+再执行 `db/schema-operation-log.sql` 会**追加**「系统日志」菜单 `m21`（`permission=logs`，挂在系统管理下），
+并只授给超级管理员——普通用户需要在角色管理里手工分配，否则访问 `/api/logs` 会得到 403。
+
+验证效果（实测）：超级管理员可见 21 项（含追加的系统日志），普通用户仅 4 项；普通用户访问 `/api/knowledge` 放行、访问 `/api/databases` 或 `/api/menu/tree` 返回 403。
 
 ### 文件清单
 
@@ -1079,8 +1169,122 @@ curl -X PUT http://localhost:8080/api/users/me/password \
 | 前端页面 | `views/system/UserManageView.vue`（管理）、`views/profile/ProfileView.vue`（自助） |
 
 
+## 系统日志模块（t_operation_log）
+
+`/api/**` 请求的审计流水：**谁**（操作人 / IP / TraceId）、对**哪个模块**做了什么（模块 / 操作类型 / URI）、
+**结果如何**（状态码 / 耗时）。由 `OperationLogInterceptor` 在请求收尾时**异步**落库，
+不参与业务事务——写日志失败只记一条 warn，绝不影响请求结果。
+
+### 接口
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/api/logs` | `logs` 权限 | 分页查询，**只读**：没有任何写接口，审计记录不允许通过 API 修改或删除 |
+
+查询参数：
+
+| 参数 | 说明 |
+|---|---|
+| `keyword` | 模糊匹配 URI / 操作人账号 / IP / TraceId（`%`、`_` 已转义） |
+| `module` | 模块**精确**匹配，取值即 URI 第二段（`auth`、`knowledge`、`logs`…） |
+| `operation` | 操作类型**精确**匹配，取值见下方推导表 |
+| `result` | `1` 成功、`0` 失败；不传表示全部 |
+| `startTime` / `endTime` | `yyyy-MM-dd HH:mm:ss`，均为闭区间；`startTime` 晚于 `endTime` 返回 400 |
+| `page` / `pageSize` | 默认 `1` / `10`；`pageSize` 上限 `100`（超出收敛到 100）；偏移量超过 100000 拒绝，400 |
+
+响应沿用全局 `PageResult`：`{ code, message, data: { items, total, page, pageSize }, timestamp }`，
+`items` 直接是实体字段（不含任何敏感信息，另包一层等字段的 VO 没有意义）。
+
+```bash
+# 查一段时间内的失败请求（URL 里的空格需编码）
+curl 'http://localhost:8080/api/logs?result=0&startTime=2026-11-04%2016:00:00&endTime=2026-11-04%2017:00:00&page=1&pageSize=20' \
+  -H 'Authorization: Bearer <token>'
+```
+
+### 记什么、不记什么
+
+| 情况 | 是否记录 | 原因 |
+|---|---|---|
+| `POST` / `PUT` / `DELETE` | 一律记录（成功失败都记） | 写操作审计价值最高 |
+| `GET` 且状态码 < 400 | **不记录** | 成功查询量大、无审计价值；全记会让表膨胀得比业务数据还快 |
+| `GET` 且状态码 ≥ 400 | 记录（`result=0`） | 失败的查询正是排查入口 |
+| `/api/auth/captcha`、`/api/auth/login-hint` | 不记录 | 高频匿名端点，纯噪音 |
+| 请求体（body） | **从不记录** | 登录、改密、建账号的 body 里有密码，审计库不该成为敏感信息的第二份存储；查询串足够定位请求 |
+
+**已知盲区**：拦截器链短路时（`AuthInterceptor` 返回 401、`MenuAccessInterceptor` 返回 403），
+排在 order=3 的本拦截器 `afterCompletion` 不会被调用，这类请求不产生日志。
+换 `Filter` 能全覆盖，但拿不到 `AuthContext`（它的存活期只覆盖拦截器链），操作人会全部为空——
+取舍后保留拦截器方案，代价是「未登录就被拒的请求查不到」。
+
+这与**登录失败**不冲突：登录请求本身走完了整条链，失败会正常落一条 `operation=login, result=0`。
+
+### 模块与操作类型的推导
+
+`module` 取 `/api/` 之后的那一段（`/api/knowledge/list` → `knowledge`），与菜单 `permission` 同一套命名，
+因此日志里的模块名可以直接对上权限标识。`operation` 先匹配特殊 URI，再按 HTTP 方法兜底：
+
+| operation | 触发条件 |
+|---|---|
+| `login` / `logout` | URI 以 `/api/auth/login`、`/api/auth/logout` 开头 |
+| `upload` / `download` | URI 含 `upload`；或含 `download` / `/zip` |
+| `create` | `POST` |
+| `update` | `PUT`、`PATCH` |
+| `delete` | `DELETE` |
+| `query` | `GET` |
+| `other` | 以上都不命中 |
+
+推导只服务于检索归类，不追求语义精确——例如 `POST /api/knowledge/batch` 是批量删除，仍会被记成 `create`。
+
+### 表结构与写入方式
+
+建表与菜单见 `db/schema-operation-log.sql`，字段：
+`id`（`varchar(64)`）、`module`、`operation`、`request_method`、`request_uri`、`query_string`（截断 512）、
+`operator_id`、`operator_name`、`operator_ip`（优先取 `X-Forwarded-For` 首段，截断 64）、
+`result`、`status_code`、`cost_ms`、`trace_id`、`create_time`。
+
+**写入用「单线程 + 有界队列」而不是同步 insert**：日志落在每条请求的收尾路径上，同步写等于给所有接口
+额外加一次库操作（数据源忙时还要排队拿连接）。请求线程只做一次无锁 `offer`（队列容量 2000），
+由一条守护线程顺序落库；**队满即丢弃并计数**，每丢 100 条告警一次；停机时把队列剩余日志冲刷落库。
+审计允许极小概率丢样本，不允许拖慢业务。
+
+三点设计取舍：
+
+- **只增不改**：没有 `update_time`、没有 `del_flag`，也没有清理接口。历史归档交给运维脚本（按 `create_time` 分批导出后删除），应用侧不提供删除入口——能被 API 删掉的审计就不是审计。
+- **索引按查询形状建**：`idx_result_time(result, create_time)` 对应最高频的「只看失败 + 时间区间」，`idx_module_operation` 对应模块 / 类型筛选，`idx_operator` 对应按人追溯。
+- **`trace_id` 与日志文件的 `%X{traceId}` 同源**（`TraceIdFilter` 生成，同时写入响应头 `X-Trace-Id`），拿它去日志平台搜能直接定位到同一次请求。上游若传来合法的 `X-Trace-Id`（`[A-Za-z0-9._-]{1,64}`）则沿用，便于跨服务串联。
+
+### 前端
+
+页面在「系统管理 › 系统日志」（`views/system/OperationLogView.vue`），只读，没有新增 / 编辑 / 删除入口：
+
+- 筛选含时间快捷段（最近 1 小时 / 今天 / 7 天 / 30 天），支持 30 秒自动刷新（页面切后台、抽屉打开时暂停）；
+- 失败记录在结果列用红点标出，表格工具栏汇总「本页失败 N 条」；
+- 整行可点开详情抽屉，请求路径 / 查询参数 / TraceId / 完整地址均可一键复制。
+
+> `/api/logs` 已在 `.env` 的 `VITE_MOCK_BYPASS` 白名单内：日志是真实审计数据，mock 里没有也不该有假数据。
+> 新增接口要接真实后端时记得同步这份白名单，否则页面会报「mock 未匹配到接口」。
+
+### 文件清单
+
+| 层级 | 文件路径 |
+|---|---|
+| 视图层 | `controller/OperationLogController.java` |
+| 服务层 | `service/OperationLogService.java`、`service/impl/OperationLogServiceImpl.java`（单线程 writer + 有界队列） |
+| 拦截器 | `config/OperationLogInterceptor.java`（注册于 `config/WebMvcConfig.java`，order=3） |
+| 链路追踪 | `config/TraceIdFilter.java` |
+| Mapper | `repository/mapper/OperationLogMapper.java`、`resources/mapper/OperationLogMapper.xml` |
+| 实体 / DTO | `repository/entity/OperationLog.java`、`model/dto/OperationLogQueryRequest.java` |
+| 建表与菜单 | `resources/db/schema-operation-log.sql` |
+| 前端 | `views/system/OperationLogView.vue`、`api/log.ts` |
+| 单元测试 | `src/test/java/com/example/erupt/config/OperationLogInterceptorTest.java`、`service/impl/OperationLogServiceImplTest.java` |
+
+
 ## 约定说明
 
+- **主键统一为字符串**：`varchar(64)`，由应用层生成（`UUID.randomUUID()` 去横线），不用数据库自增——写入前就能拿到 id，数据合并 / 迁移时也不会撞键。人 ID 与各类引用列（`create_user_id`、`update_user_id`、`role_id`、`menu_id`、`conversation_id`、`attachment_id`…）同为 `varchar(64)`，与主键宽度对齐，避免 join 时隐式转换。
+  历史遗留的 `bigint` 主键由 `db/migrate_id_to_varchar32.sql` 用 `LPAD(id, 32, '0')` 转成 32 位定长字符串（`1` → `00000000000000000000000000000001`）。因此库里会看到「32 位补零历史值」与「32 位 UUID」两种形态并存：宽度一致、补零后字典序等于原数值序，排序与索引都不受影响。
+  例外：`t_file_upload_log.business_id` 是业务对象 id（可能指向非 `t_` 表），保持 `bigint`，不参与这套约定。
+- **审计只读**：`t_operation_log` 只增不改、没有删除接口，唯一入口是 `GET /api/logs`；历史归档交给运维脚本。
 - 数据层只做持久化，不含业务判断；服务层承载业务规则与 `@Transactional` 事务边界。
 - 写操作使用 `@Transactional(rollbackFor = Exception.class)`，查询使用 `readOnly = true`。
 - 分页基于 `LIMIT/OFFSET` + 计数查询，条件为零结果时跳过列表查询，避免无效 SQL。

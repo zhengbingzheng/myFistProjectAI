@@ -107,7 +107,7 @@ app:
   attachment:
     # 文件存储根目录，支持绝对路径，也支持相对启动目录的相对路径
     storage-dir: ./uploads
-    # 单个文件的上传大小上限（KB），0 表示不限制；此处 10240 KB = 10 MB
+    # 单个文件的上传大小上限（KB），0 表示不限制；此处 51200 KB = 50 MB
     max-upload-size-kb: 51200
     # 多附件打包下载的总大小阈值（KB），超过则在打包前中止并返回提示；此处 51200 KB = 50 MB
     zip-max-total-size-kb: 51200
