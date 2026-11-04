@@ -41,7 +41,7 @@ spring:
     redis:
       host: ${REDIS_HOST:127.0.0.1}
       port: ${REDIS_PORT:6379}
-      # 8密码默认留空，由 REDIS_PASSWORD 注入；本机 Redis 密码放在 gitignore 的 application-local.yml 中
+      # 密码默认留空，由 REDIS_PASSWORD 注入；本机 Redis 密码放在 gitignore 的 application-local.yml 中
       password: ${REDIS_PASSWORD:}
       database: ${REDIS_DATABASE:0}
       # 建连超时与读写超时分开配：前者网络不通时快速失败，后者命令执行慢时快速失败。
