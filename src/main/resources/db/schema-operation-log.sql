@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS `t_operation_log` (
   COLLATE = utf8mb4_0900_ai_ci COMMENT = '系统操作日志';
 
 -- ----------------------------------------------------------------------------
--- 菜单种子：系统管理 › 系统日志（挂在 m16 系统管理下，排在用户授权之后）
+-- 菜单种子：系统管理 › 系统日志（挂在 m16 系统管理下，排在数据字典之后）
+-- 注意：m20 已被本库的「数据字典」菜单占用，系统日志使用 m21。
 -- permission = logs，与 URI /api/logs 的第二段对应——
 -- 未授权用户访问 /api/logs 会被 MenuAccessInterceptor 拦为 403。
 -- ----------------------------------------------------------------------------
@@ -51,9 +52,9 @@ INSERT IGNORE INTO `t_menu`
     (`id`, `parent_id`, `menu_name`, `menu_code`, `menu_type`, `path`, `component`,
      `icon`, `sort_num`, `visible`, `permission`, `del_flag`, `create_by`, `create_time`, `update_time`)
 VALUES
-    ('m20', 'm16', '系统日志', 'system_log', 2, '/system/log', 'system/OperationLogView.vue',
-     'Tickets', 4, 1, 'logs', '0', 'init', NOW(), NOW());
+    ('m21', 'm16', '系统日志', 'system_log', 2, '/system/log', 'system/OperationLogView.vue',
+     'Tickets', 5, 1, 'logs', '0', 'init', NOW(), NOW());
 
 -- 超级管理员默认授权（普通用户不授，需要时在角色管理里手工分配）
 INSERT IGNORE INTO `t_role_menu` (`id`, `role_id`, `menu_id`, `create_by`, `create_time`)
-VALUES ('rm_sup_m20', 'r_super', 'm20', 'init', NOW());
+VALUES ('rm_sup_m21', 'r_super', 'm21', 'init', NOW());
