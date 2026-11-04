@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.erupt.repository.mapper.ChatAttachmentMapper">
+
+    <insert id="insert">
+        INSERT INTO t_chat_attachment
+            (id, original_name, file_ext, content_type, file_size,
+             storage_path, uploader_id, del_flag, create_time)
+        VALUES
+            (#{id}, #{originalName}, #{fileExt}, #{contentType}, #{fileSize},
+             #{storagePath}, #{uploaderId}, '0', NOW())
+    </insert>
+
+    <select id="selectById" resultType="com.example.erupt.repository.entity.ChatAttachment">
+        SELECT id            AS id,
+               original_name AS originalName,
+               file_ext      AS fileExt,
+               content_type  AS contentType,
+               file_size     AS fileSize,
+               storage_path  AS storagePath,
+               uploader_id   AS uploaderId,
+               del_flag      AS delFlag,
+               create_time   AS createTime
+        FROM t_chat_attachment
+        WHERE id = #{id}
+          AND del_flag = '0'
+    </select>
+
+</mapper>

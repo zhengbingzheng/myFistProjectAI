@@ -1,0 +1,211 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.erupt.repository.mapper.DictMapper">
+
+    <!-- ==================== 字典类型 ==================== -->
+
+    <sql id="Dict_Columns">
+        d.id, d.dict_type AS dictType, d.dict_name AS dictName, d.status, d.remark,
+        d.del_flag AS delFlag, d.create_by AS createBy, d.update_by AS updateBy,
+        d.create_time AS createTime, d.update_time AS updateTime
+    </sql>
+
+    <!-- dict_type_active 是生成列，只出现在建表语句里，插入/更新一律不碰 -->
+    <insert id="insertDict">
+        INSERT INTO t_dict
+            (id, dict_type, dict_name, status, remark, del_flag, create_by, create_time, update_time)
+        VALUES
+            (#{id}, #{dictType}, #{dictName}, #{status}, #{remark}, '0', #{createBy}, NOW(), NOW())
+    </insert>
+
+    <update id="updateDict">
+        UPDATE t_dict
+        <set>
+            <if test="dictName != null">dict_name = #{dictName},</if>
+            <if test="status != null">status = #{status},</if>
+            <if test="remark != null">remark = #{remark},</if>
+            <if test="updateBy != null">update_by = #{updateBy},</if>
+        </set>
+        WHERE id = #{id} AND del_flag = '0'
+    </update>
+
+    <update id="logicDeleteDict">
+        UPDATE t_dict
+        SET del_flag   = '1',
+            update_by  = #{updateBy},
+            update_time = NOW()
+        WHERE id = #{id}
+          AND del_flag = '0'
+    </update>
+
+    <select id="selectDictById" resultType="com.example.erupt.repository.entity.Dict">
+        SELECT
+        <include refid="Dict_Columns"/>
+        FROM t_dict d
+        WHERE d.id = #{id} AND d.del_flag = '0'
+        LIMIT 1
+    </select>
+
+    <select id="selectDictByType" resultType="com.example.erupt.repository.entity.Dict">
+        SELECT
+        <include refid="Dict_Columns"/>
+        FROM t_dict d
+        WHERE d.dict_type = #{dictType} AND d.del_flag = '0'
+        LIMIT 1
+    </select>
+
+    <!--
+      类型列表：按创建时间倒序，最新维护的排在最前。
+      keyword 同时匹配编码与名称——管理员往往只记得其中一半。
+    -->
+    <select id="selectDicts" resultType="com.example.erupt.repository.entity.Dict">
+        SELECT
+        <include refid="Dict_Columns"/>
+        FROM t_dict d
+        WHERE d.del_flag = '0'
+        <if test="keyword != null and keyword != ''">
+            AND (d.dict_type LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/'
+            OR d.dict_name LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/')
+        </if>
+        ORDER BY d.create_time DESC
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <select id="countDicts" resultType="long">
+        SELECT COUNT(*)
+        FROM t_dict d
+        WHERE d.del_flag = '0'
+        <if test="keyword != null and keyword != ''">
+            AND (d.dict_type LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/'
+            OR d.dict_name LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/')
+        </if>
+    </select>
+
+    <!-- ==================== 字典项 ==================== -->
+
+    <!-- value 是 MySQL 保留字（VALUE），所有出现处都必须反引号转义 -->
+    <sql id="DictItem_Columns">
+        i.id, i.dict_type AS dictType, i.label, i.`value`, i.sort_num AS sortNum, i.status,
+        i.list_class AS listClass, i.is_default AS isDefault, i.remark,
+        i.del_flag AS delFlag, i.create_by AS createBy, i.update_by AS updateBy,
+        i.create_time AS createTime, i.update_time AS updateTime
+    </sql>
+
+    <insert id="insertItem">
+        INSERT INTO t_dict_item
+            (id, dict_type, label, `value`, sort_num, status, list_class, is_default,
+             remark, del_flag, create_by, create_time, update_time)
+        VALUES
+            (#{id}, #{dictType}, #{label}, #{value}, #{sortNum}, #{status}, #{listClass},
+             #{isDefault}, #{remark}, '0', #{createBy}, NOW(), NOW())
+    </insert>
+
+    <update id="updateItem">
+        UPDATE t_dict_item
+        <set>
+            <if test="label != null">label = #{label},</if>
+            <if test="value != null">`value` = #{value},</if>
+            <if test="sortNum != null">sort_num = #{sortNum},</if>
+            <if test="status != null">status = #{status},</if>
+            <if test="listClass != null">list_class = #{listClass},</if>
+            <if test="isDefault != null">is_default = #{isDefault},</if>
+            <if test="remark != null">remark = #{remark},</if>
+            <if test="updateBy != null">update_by = #{updateBy},</if>
+        </set>
+        WHERE id = #{id} AND del_flag = '0'
+    </update>
+
+    <update id="logicDeleteItem">
+        UPDATE t_dict_item
+        SET del_flag   = '1',
+            update_by  = #{updateBy},
+            update_time = NOW()
+        WHERE id = #{id}
+          AND del_flag = '0'
+    </update>
+
+    <select id="selectItemById" resultType="com.example.erupt.repository.entity.DictItem">
+        SELECT
+        <include refid="DictItem_Columns"/>
+        FROM t_dict_item i
+        WHERE i.id = #{id} AND i.del_flag = '0'
+        LIMIT 1
+    </select>
+
+    <!--
+      按类型取项：走 idx_dict_type_sort_num 索引，排序号相同时用 id 兜底，
+      保证同一页内顺序稳定（否则分页翻动时可能出现"同一行出现在两页"）。
+    -->
+    <select id="selectItemsByType" resultType="com.example.erupt.repository.entity.DictItem">
+        SELECT
+        <include refid="DictItem_Columns"/>
+        FROM t_dict_item i
+        WHERE i.dict_type = #{dictType}
+          AND i.del_flag = '0'
+        ORDER BY i.sort_num, i.id
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <!--
+      下拉 / 搜索栏专用：一次取全量，不分页。
+      与 selectItemsByType 的差别是额外过滤启用状态：
+      管理页面必须能看到已禁用的项才有机会把它重新启用，
+      而下拉框只该给出"能选"的项，禁用的混进来会让人选到一个不该用的值。
+
+      必须联 t_dict：类型和项各有自己的启用/删除状态，是两层开关。
+      只过滤项会漏掉"整个类型被停用"的情况——那时项本身仍然是启用的，
+      不联表就会把一个已停用的字典又放回可选项里。
+      所以要求两层同时成立：类型未删除且启用 且 项未删除且启用。
+      排序沿用 sort_num，同序号时用 id 兜底保证顺序稳定。
+    -->
+    <select id="selectEnabledItemsByType" resultType="com.example.erupt.repository.entity.DictItem">
+        SELECT
+        <include refid="DictItem_Columns"/>
+        FROM t_dict_item i
+        INNER JOIN t_dict d
+                ON d.dict_type = i.dict_type
+        WHERE i.dict_type = #{dictType}
+          AND i.del_flag = '0'
+          AND i.status = 1
+          AND d.del_flag = '0'
+          AND d.status = 1
+        ORDER BY i.sort_num, i.id
+    </select>
+
+    <select id="countItems" resultType="long">
+        SELECT COUNT(*)
+        FROM t_dict_item i
+        WHERE i.dict_type = #{dictType}
+          AND i.del_flag = '0'
+    </select>
+
+    <select id="countItemValue" resultType="int">
+        SELECT COUNT(*)
+        FROM t_dict_item i
+        WHERE i.dict_type = #{dictType}
+          AND i.`value` = #{value}
+          AND i.del_flag = '0'
+        <if test="excludeId != null">
+            AND i.id &lt;&gt; #{excludeId}
+        </if>
+    </select>
+
+    <select id="countItemsByType" resultType="int">
+        SELECT COUNT(*)
+        FROM t_dict_item
+        WHERE dict_type = #{dictType}
+          AND del_flag = '0'
+    </select>
+
+    <!-- 删除类型时连带软删除它的全部项，避免留下永远取不到的孤儿数据 -->
+    <update id="logicDeleteItemsByType">
+        UPDATE t_dict_item
+        SET del_flag   = '1',
+            update_by  = #{updateBy},
+            update_time = NOW()
+        WHERE dict_type = #{dictType}
+          AND del_flag = '0'
+    </update>
+
+</mapper>

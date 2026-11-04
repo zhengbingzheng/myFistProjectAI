@@ -1,0 +1,185 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.erupt.repository.mapper.KnowledgeMapper">
+
+    <resultMap id="BaseResultMap" type="com.example.erupt.repository.entity.Knowledge">
+        <id column="id" property="id" jdbcType="VARCHAR"/>
+        <result column="knowledge_name" property="knowledgeName" jdbcType="VARCHAR"/>
+        <result column="knowledge_content" property="knowledgeContent" jdbcType="LONGVARCHAR"/>
+        <result column="knowledge_type" property="knowledgeType" jdbcType="VARCHAR"/>
+        <!-- 两列已改为 varchar(64)，存 t_user.id，故用 VARCHAR 而非 BIGINT -->
+        <result column="create_user_id" property="createUserId" jdbcType="VARCHAR"/>
+        <result column="update_user_id" property="updateUserId" jdbcType="VARCHAR"/>
+        <result column="create_time" property="createTime" jdbcType="TIMESTAMP"/>
+        <result column="update_time" property="updateTime" jdbcType="TIMESTAMP"/>
+    </resultMap>
+
+    <!--
+      列表字段。刻意不含 knowledge_content（mediumtext 大字段）：
+      正文只在详情接口（selectById 走 Base_Column_List）返回，列表查询不触碰大文本，
+      避免一次列表就把全表正文读进内存、再随 JSON 传回前端。
+      要看正文统一走「详情」按钮（GET /api/knowledge/{id}）。
+    -->
+    <sql id="List_Column_List">
+        id, knowledge_name, knowledge_type, create_user_id, update_user_id, create_time, update_time
+    </sql>
+
+    <sql id="Base_Column_List">
+        id, knowledge_name, knowledge_content, knowledge_type, create_user_id, update_user_id, create_time, update_time
+    </sql>
+
+    <sql id="Condition_Where">
+        <where>
+            <if test="type != null and type != ''">
+                AND knowledge_type = #{type}
+            </if>
+            <!--
+              标题 + 正文（mediumtext）模糊匹配。ESCAPE '/' 配合服务层 LikeEscape，
+              避免用户输入的 %、_ 被当作通配符。
+              注意：LIKE '%keyword%' 对 mediumtext 无法使用普通索引，会走全表扫描；
+              当前 t_knowledge 数据量小（13 行）无影响，数据量增长后建议改为
+              FULLTEXT 索引 + MATCH(...) AGAINST(...)，或接入 Elasticsearch。
+            -->
+            <if test="keyword != null and keyword != ''">
+                AND (knowledge_name LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/'
+                OR knowledge_content LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/')
+            </if>
+        </where>
+    </sql>
+
+    <!--
+      全文检索条件：依赖 t_knowledge 上的全文索引 ft_knowledge_search（ngram 解析器）。
+      相比 LIKE '%kw%' 可利用索引、避免 mediumtext 全表扫描；
+      但受 ngram_token_size=2 限制，单字/单词无法命中，这类关键词由服务层降级回 LIKE。
+    -->
+    <sql id="Condition_Where_FullText">
+        <where>
+            <if test="type != null and type != ''">
+                AND knowledge_type = #{type}
+            </if>
+            <if test="keyword != null and keyword != ''">
+                AND MATCH(knowledge_name, knowledge_content) AGAINST(#{keyword} IN BOOLEAN MODE)
+            </if>
+        </where>
+    </sql>
+
+    <!--
+      主键由应用层生成（32 位字符串），不再用 useGeneratedKeys 依赖数据库自增回填。
+      少一次自增值的获取往返，也让 insert 的字段列表与实际写入保持一致。
+    -->
+    <insert id="insert" parameterType="com.example.erupt.repository.entity.Knowledge">
+        INSERT INTO t_knowledge (id, knowledge_name, knowledge_content, knowledge_type,
+                                 create_user_id, create_time, update_time)
+        VALUES (#{id}, #{knowledgeName}, #{knowledgeContent}, #{knowledgeType},
+                #{createUserId}, #{createTime}, #{updateTime})
+    </insert>
+
+    <select id="selectById" resultMap="BaseResultMap" parameterType="java.lang.String">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM t_knowledge
+        WHERE id = #{id}
+    </select>
+
+    <select id="selectByTypeAndName" resultMap="BaseResultMap">
+        SELECT
+        <include refid="List_Column_List"/>
+        FROM t_knowledge
+        WHERE knowledge_type = #{type}
+          AND knowledge_name = #{name}
+        LIMIT 1
+    </select>
+
+    <select id="selectByCondition" resultMap="BaseResultMap">
+        SELECT
+        <include refid="List_Column_List"/>
+        FROM t_knowledge
+        <include refid="Condition_Where"/>
+        <!-- 按录入时间倒序：主键是 UUID，ORDER BY id 得到的只是随机顺序，
+             新增的记录会散落在任意位置，列表看起来毫无规律。同秒录入时用 id 兜底保证稳定。 -->
+        ORDER BY create_time DESC, id DESC
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <select id="countByCondition" resultType="long">
+        SELECT COUNT(*)
+        FROM t_knowledge
+        <include refid="Condition_Where"/>
+    </select>
+
+    <select id="selectByConditionFullText" resultMap="BaseResultMap">
+        SELECT
+        <include refid="List_Column_List"/>
+        FROM t_knowledge
+        <include refid="Condition_Where_FullText"/>
+        <!--
+          全文检索按相关度倒序：BOOLEAN MODE 下 MATCH 会算出每行的相关度分数，
+          不显式按它排序的话只能退化为按时间排，"最匹配的那条"可能被挤到第二页。
+          相关度相同时用 create_time + id 兜底，保证翻页顺序稳定。
+
+          注意 keyword 判空：selectByConditionFullText 只在服务层认定关键词可走全文时才被调用，
+          正常情况下 keyword 必非空；这里仍然分支，避免将来被别处复用时拼出
+          ORDER BY MATCH(...) AGAINST(NULL) 这种语法上说得通、语义上毫无意义的排序。
+        -->
+        <choose>
+            <when test="keyword != null and keyword != ''">
+                ORDER BY MATCH(knowledge_name, knowledge_content) AGAINST(#{keyword} IN BOOLEAN MODE) DESC,
+                create_time DESC, id DESC
+            </when>
+            <otherwise>
+                ORDER BY create_time DESC, id DESC
+            </otherwise>
+        </choose>
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <select id="countByConditionFullText" resultType="long">
+        SELECT COUNT(*)
+        FROM t_knowledge
+        <include refid="Condition_Where_FullText"/>
+    </select>
+
+    <update id="updateById" parameterType="com.example.erupt.repository.entity.Knowledge">
+        UPDATE t_knowledge
+        <set>
+            <if test="knowledgeName != null">knowledge_name = #{knowledgeName},</if>
+            <if test="knowledgeContent != null">knowledge_content = #{knowledgeContent},</if>
+            <if test="knowledgeType != null">knowledge_type = #{knowledgeType},</if>
+            <if test="updateUserId != null">update_user_id = #{updateUserId},</if>
+            <if test="updateTime != null">update_time = #{updateTime},</if>
+        </set>
+        WHERE id = #{id}
+    </update>
+
+    <delete id="deleteById" parameterType="java.lang.String">
+        DELETE FROM t_knowledge
+        WHERE id = #{id}
+    </delete>
+
+    <!-- 批量删除：ids 由服务层保证非空且已去重 -->
+    <delete id="deleteByIds">
+        DELETE FROM t_knowledge
+        WHERE id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </delete>
+
+    <select id="countByIds" resultType="long">
+        SELECT COUNT(*)
+        FROM t_knowledge
+        WHERE id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </select>
+
+    <!-- 类型去重：SQL 层 DISTINCT + 剔除空值，应用层再做 trim 后二次去重 -->
+    <select id="selectDistinctTypes" resultType="java.lang.String">
+        SELECT DISTINCT TRIM(knowledge_type) AS knowledge_type
+        FROM t_knowledge
+        WHERE knowledge_type IS NOT NULL
+          AND TRIM(knowledge_type) != ''
+        ORDER BY knowledge_type
+    </select>
+</mapper>

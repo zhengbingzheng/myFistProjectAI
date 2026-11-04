@@ -1,0 +1,224 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.erupt.repository.mapper.AttachmentMapper">
+
+    <resultMap id="BaseResultMap" type="com.example.erupt.repository.entity.Attachment">
+        <id column="id" property="id" jdbcType="VARCHAR"/>
+        <result column="original_name" property="originalName" jdbcType="VARCHAR"/>
+        <result column="file_ext" property="fileExt" jdbcType="VARCHAR"/>
+        <result column="file_type" property="fileType" jdbcType="VARCHAR"/>
+        <result column="content_type" property="contentType" jdbcType="VARCHAR"/>
+        <result column="file_size" property="fileSize" jdbcType="BIGINT"/>
+        <result column="file_hash" property="fileHash" jdbcType="VARCHAR"/>
+        <result column="storage_type" property="storageType" jdbcType="VARCHAR"/>
+        <result column="storage_path" property="storagePath" jdbcType="VARCHAR"/>
+        <result column="thumbnail_path" property="thumbnailPath" jdbcType="VARCHAR"/>
+        <result column="download_count" property="downloadCount" jdbcType="BIGINT"/>
+        <result column="remark" property="remark" jdbcType="VARCHAR"/>
+        <result column="create_by" property="createBy" jdbcType="VARCHAR"/>
+        <result column="create_time" property="createTime" jdbcType="TIMESTAMP"/>
+        <result column="update_by" property="updateBy" jdbcType="VARCHAR"/>
+        <result column="update_time" property="updateTime" jdbcType="TIMESTAMP"/>
+        <result column="del_flag" property="delFlag" jdbcType="CHAR"/>
+        <result column="delete_by" property="deleteBy" jdbcType="VARCHAR"/>
+        <result column="delete_time" property="deleteTime" jdbcType="TIMESTAMP"/>
+        <result column="recycle_expire_time" property="recycleExpireTime" jdbcType="TIMESTAMP"/>
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        id, original_name, file_ext, file_type, content_type, file_size, file_hash,
+        storage_type, storage_path, thumbnail_path, download_count, remark,
+        create_by, create_time, update_by, update_time,
+        del_flag, delete_by, delete_time, recycle_expire_time
+    </sql>
+
+    <insert id="insert">
+        INSERT INTO t_attachment (id, original_name, file_ext, file_type, content_type, file_size, file_hash,
+                                  storage_type, storage_path, thumbnail_path, download_count, remark,
+                                  create_by, create_time, del_flag)
+        VALUES (#{id}, #{originalName}, #{fileExt}, #{fileType}, #{contentType}, #{fileSize}, #{fileHash},
+                #{storageType}, #{storagePath}, #{thumbnailPath}, #{downloadCount}, #{remark},
+                #{createBy}, #{createTime}, #{delFlag})
+    </insert>
+
+    <select id="selectById" resultMap="BaseResultMap">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM t_attachment
+        WHERE id = #{id}
+        AND del_flag = '0'
+    </select>
+
+    <!-- ids 由服务层保证非空且已去重，避免生成 IN () 这类非法 SQL -->
+    <select id="selectByIds" resultMap="BaseResultMap">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM t_attachment
+        WHERE id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+        AND del_flag = '0'
+    </select>
+
+    <update id="incrementDownloadCount">
+        UPDATE t_attachment
+        SET download_count = download_count + 1
+        WHERE id = #{id}
+        AND del_flag = '0'
+    </update>
+
+    <!--
+      列表查询条件：文件名模糊 + 分类精确 + 上传时间区间。
+      常量条件 del_flag 放这里而非外部写 WHERE，是为了让 select 与 count 能整段复用同一份条件，
+      避免两边条件不一致导致"列表有数据但总数是 0"这类难查的问题。
+      注意：动作条件里不能嵌套 <where>（会生成两个 WHERE），统一由外层单个 <where> 包裹。
+    -->
+    <sql id="Condition_Where">
+        del_flag = #{delFlag}
+        <!-- originalName 已由服务层用 LikeEscape 转义，此处必须写 ESCAPE '/' 才能正确匹配 %、_ -->
+        <if test="originalName != null and originalName != ''">
+            AND original_name LIKE CONCAT('%', #{originalName}, '%') ESCAPE '/'
+        </if>
+        <if test="fileType != null and fileType != ''">
+            AND file_type = #{fileType}
+        </if>
+        <if test="startTime != null">
+            AND create_time &gt;= #{startTime}
+        </if>
+        <if test="endTime != null">
+            AND create_time &lt;= #{endTime}
+        </if>
+    </sql>
+
+    <select id="selectPageByCondition" resultMap="BaseResultMap">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM t_attachment
+        <where>
+            <include refid="Condition_Where"/>
+        </where>
+        <choose>
+            <!-- 回收站按删除时间倒序：最晚被删的排最前，符合"最近删除先看"的直觉 -->
+            <when test="delFlag == '1'">
+                ORDER BY delete_time DESC, create_time DESC
+            </when>
+            <otherwise>
+                ORDER BY create_time DESC
+            </otherwise>
+        </choose>
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <select id="countByCondition" resultType="long">
+        SELECT COUNT(*)
+        FROM t_attachment
+        <where>
+            <include refid="Condition_Where"/>
+        </where>
+    </select>
+
+    <!-- 恢复前的状态判断需要看到被逻辑删除的记录，故此处不带 del_flag 条件 -->
+    <select id="selectByIdAnyFlag" resultMap="BaseResultMap">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM t_attachment
+        WHERE id = #{id}
+    </select>
+
+    <!-- ids 由服务层保证非空且已去重，避免生成 IN () 这类非法 SQL -->
+    <select id="countByIds" resultType="long">
+        SELECT COUNT(*)
+        FROM t_attachment
+        WHERE id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </select>
+
+    <select id="countInRecycleByIds" resultType="long">
+        SELECT COUNT(*)
+        FROM t_attachment
+        WHERE id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+        AND del_flag = '1'
+    </select>
+
+    <!--
+      恢复 = 状态回退 + 清空删除过程字段。
+      带上 del_flag = '1' 这个前提条件，保证并发重复调用时不会把已是正常状态的记录误改。
+    -->
+    <update id="restoreByIds">
+        UPDATE t_attachment
+        SET del_flag = '0',
+            delete_by = NULL,
+            delete_time = NULL,
+            recycle_expire_time = NULL,
+            update_time = #{updateTime}
+        WHERE id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+        AND del_flag = '1'
+    </update>
+
+    <select id="countNormalByIds" resultType="long">
+        SELECT COUNT(*)
+        FROM t_attachment
+        WHERE id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+        AND del_flag = '0'
+    </select>
+
+    <!--
+      移入回收站 = 软删除。带 del_flag = '0' 前提：
+      只对当前处于正常状态的记录生效，重复调用不会覆盖首次删除的时间。
+    -->
+    <update id="moveToRecycleByIds">
+        UPDATE t_attachment
+        SET del_flag = '1',
+            delete_time = #{deleteTime},
+            recycle_expire_time = #{recycleExpireTime},
+            update_time = #{deleteTime}
+        WHERE id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+        AND del_flag = '0'
+    </update>
+
+    <select id="selectRecycledByIds" resultMap="BaseResultMap">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM t_attachment
+        WHERE id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+        AND del_flag = '1'
+    </select>
+
+    <select id="selectAllRecycled" resultMap="BaseResultMap">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM t_attachment
+        WHERE del_flag = '1'
+    </select>
+
+    <!--
+      物理删除。保留 del_flag = '1' 这个前提，是"删除必须先过回收站"的最后一道防线：
+      即使上层校验被绕过，正常状态的附件也不会被直接 DELETE 掉。
+    -->
+    <delete id="deleteRecycledByIds">
+        DELETE FROM t_attachment
+        WHERE id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+        AND del_flag = '1'
+    </delete>
+</mapper>

@@ -1,0 +1,174 @@
+server:
+  port: 8080
+  shutdown: graceful
+
+spring:
+  application:
+    name: erupt-example
+  # 默认激活 local 档。本机凭据不再放在 src/main/resources（会打进 jar 随产物泄漏），
+  # 而是以 optional 方式从工程根目录的 ./config/application-local.yml 引入：
+  # 文件不存在（如生产）只是跳过装载，存在且档位为 local 时才生效。
+  profiles:
+    default: local
+  # 语法：optional:前缀 = 文件不存在不报错；这里必须写 file:
+  config:
+    import: "optional:file:./config/application-local.yml"
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # 注意：Connector/J 不支持 characterEncoding=utf8mb4，保持 useUnicode=true 由服务端协商即可
+    # 连接参数全部支持环境变量覆盖；生产环境请设 DB_USE_SSL=true 并关闭 DB_ALLOW_PUBLIC_KEY_RETRIEVAL
+    url: jdbc:mysql://${DB_HOST:127.0.0.1}:${DB_PORT:3306}/${DB_NAME:erupt-example}?useUnicode=true&useSSL=${DB_USE_SSL:false}&allowPublicKeyRetrieval=${DB_ALLOW_PUBLIC_KEY_RETRIEVAL:true}&serverTimezone=Asia/Shanghai
+    # 生产环境请通过环境变量注入（DB_USERNAME / DB_PASSWORD），避免凭据入库。
+    # 本机开发密码在 gitignore 的 application-local.yml 中，由 spring.profiles.default=local 加载。
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:}
+    hikari:
+      pool-name: erupt-example-hikari
+      minimum-idle: 5
+      maximum-pool-size: 20
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      connection-timeout: 30000
+      connection-test-query: SELECT 1
+  mvc:
+    throw-exception-if-no-handler-found: false
+
+  # Redis 连接参数：全部支持环境变量覆盖，便于不同环境注入（生产建议只走环境变量）
+  # key 必须是 spring.data.redis（Spring Boot 2.0+ 起的写法），写成 spring.redis 不会生效
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      # 密码默认留空，由 REDIS_PASSWORD 注入；本机 Redis 密码放在 gitignore 的 application-local.yml 中
+      password: ${REDIS_PASSWORD:}
+      database: ${REDIS_DATABASE:0}
+      # 建连超时与读写超时分开配：前者网络不通时快速失败，后者命令执行慢时快速失败。
+      # 都设短一些可读，是降级能及时生效的前提（否则线程会长时间挂起）
+      connect-timeout: ${REDIS_CONNECT_TIMEOUT:2s}
+      timeout: ${REDIS_READ_TIMEOUT:2s}
+      lettuce:
+        pool:
+          enabled: true
+          max-active: ${REDIS_POOL_MAX_ACTIVE:8}
+          max-idle: ${REDIS_POOL_MAX_IDLE:8}
+          min-idle: ${REDIS_POOL_MIN_IDLE:2}
+          max-wait: ${REDIS_POOL_MAX_WAIT:2s}
+
+  servlet:
+    multipart:
+      # 容器层的上传限制。必须大于 app.attachment.max-upload-size-kb，
+      # 否则请求会在进入业务层之前就被拦下，业务层的友好提示不会生效。
+      max-file-size: 100MB
+      max-request-size: 500MB
+
+mybatis:
+  mapper-locations: classpath*:mapper/**/*.xml
+  type-aliases-package: com.example.erupt.repository.entity
+  configuration:
+    map-underscore-to-camel-case: true
+    default-statement-timeout: 30
+    jdbc-type-for-null: 'NULL'
+    log-impl: org.apache.ibatis.logging.slf4j.Slf4jImpl
+
+# 应用自定义配置
+app:
+  # ---- 认证与安全策略 ----
+  # 登录接口：POST /api/auth/login，凭证放在 Authorization: Bearer <token> 请求头
+  auth:
+    # Token 签名密钥。生产环境必须用 AUTH_TOKEN_SECRET 覆盖掉这里的默认值。
+    # 默认值是随机生成的高强度密钥，仅用于本地开发，不再是可猜测的固定短语。
+    token-secret: ${AUTH_TOKEN_SECRET:23992b84f319d7c0754b8681654b2371128fdb74ff6b29923f05230ab47ce60b}
+    # Token 有效期
+    token-ttl: ${AUTH_TOKEN_TTL:2h}
+    # 连续登录失败达到该次数即锁定账号
+    login-max-failures: ${AUTH_LOGIN_MAX_FAILURES:5}
+    # 失败计数窗口，同时也是锁定时长
+    login-fail-window: ${AUTH_LOGIN_FAIL_WINDOW:15m}
+    # 验证码有效期
+    captcha-ttl: ${AUTH_CAPTCHA_TTL:2m}
+    # 是否强制每次登录都要验证码。默认 false：
+    # 连续失败 2 次后自动要求输入验证码，做到"正常用户无感、攻击者受限"
+    captcha-required: ${AUTH_CAPTCHA_REQUIRED:false}
+    # 鉴权总开关。设为 false 时所有接口放行，仅用于本地联调，切勿在生产开启
+    enabled: ${AUTH_ENABLED:true}
+
+  knowledge:
+    # 知识列表检索模式：
+    #   true  = 全文索引 MATCH(...) AGAINST(...)，依赖索引 ft_knowledge_search（见 db/schema.sql），
+    #           性能优于 LIKE，但受 ngram_token_size=2 限制，单字关键词会自动降级为 LIKE
+    #   false = 全部走 LIKE '%kw%'，无需索引，mediumtext 全表扫描，仅小数据量适用
+    fulltext-enabled: true
+
+  # 附件模块：大小阈值统一以 KB 为单位
+  attachment:
+    # 文件存储根目录，支持绝对路径，也支持相对启动目录的相对路径
+    storage-dir: ./uploads
+    # 单个文件的上传大小上限（KB），0 表示不限制；此处 10240 KB = 10 MB
+    max-upload-size-kb: 51200
+    # 多附件打包下载的总大小阈值（KB），超过则在打包前中止并返回提示；此处 51200 KB = 50 MB
+    zip-max-total-size-kb: 51200
+
+  # 聊天附件：与文件管理完全独立（独立的表 t_chat_attachment、独立的存储目录）
+  #
+  # 目录刻意与 app.attachment.storage-dir 平级，而不是它的子目录：
+  # 运维的备份、清理、迁移脚本通常以附件根目录为界，聊天附件放在其内部就会被顺带波及，
+  # 那样"分开"只是名义上的。启动时会校验两者互不包含，配错直接失败。
+  #
+  # 目录结构：<storage-dir>/yyyy/MM/dd/<id>.<ext>
+  chat:
+    attachment:
+      storage-dir: ./chat-uploads
+
+  # ---- Redis 缓存策略 ----
+  # 说明：Redis 只做加速层，不承担数据源职责。任何情况下缓存不可用都必须能退化到直查库，
+  #       因此下面所有 TTL / 开关都可以在不重启应用的前提下通过环境变量调整。
+  cache:
+    redis:
+      # 总开关。false = 所有缓存读写直接短路，业务走数据库。排障第一步就是把它关掉做对比
+      enabled: ${CACHE_REDIS_ENABLED:true}
+      # Key 前缀：不同应用/环境共用同一 Redis 时靠它做命名空间隔离，批量删除也依赖它
+      key-prefix: ${CACHE_KEY_PREFIX:erupt-example:cache:}
+      # 未显式指定时的兜底过期时间
+      default-ttl: ${CACHE_DEFAULT_TTL:10m}
+      # 空值缓存时长。用于缓存穿透防护：查不到的 key 也短期记住，避免每次都打到数据库
+      null-value-ttl: ${CACHE_NULL_TTL:60s}
+      # TTL 随机抖动比例（±%）。同为 10 分钟过期的 key 会在 8~12 分钟间分散到期，
+      # 避免同一秒大批 key 集体失效把请求全量压到数据库（缓存雪崩）
+      ttl-jitter-percent: ${CACHE_TTL_JITTER_PERCENT:20}
+      # 击穿保护（单个热点 key 失效瞬间的并发重建）
+      lock-wait-ms: ${CACHE_LOCK_WAIT_MS:500}
+      lock-lease-ms: ${CACHE_LOCK_LEASE_MS:5000}
+
+      # 各业务模块的过期策略。读多写少 → 长 TTL；写频繁 → 短 TTL，靠写操作失效
+      navigation:
+        # 单条详情：读多写少，10 分钟
+        detail-ttl: ${CACHE_NAV_DETAIL_TTL:10m}
+        # 分页列表：查询条件组合多、命中率低于详情，5 分钟
+        list-ttl: ${CACHE_NAV_LIST_TTL:5m}
+        # 分类列表：几乎不变、且几乎每个列表页都要用，30 分钟
+        cat-ttl: ${CACHE_NAV_CAT_TTL:30m}
+
+  # ---- WebSocket（即时通信）----
+  ws:
+    # 允许建立 WebSocket 连接的来源白名单（Spring 要求浏览器 WS 必带的 Origin 必须命中）。
+    # 不配置会导致跨域握手被直接拒绝（403）；绝不能设为 *，
+    # 那等于允许任意站点借用用户凭证建立实时连接。
+    allowed-origins: ${WS_ALLOWED_ORIGINS:http://localhost:8081,http://127.0.0.1:8081,http://localhost:8080,http://127.0.0.1:8080}
+
+# 接口文档开关：生产环境建议置为 false（通过环境变量关闭），避免把接口清单暴露给未授权访问
+springdoc:
+  api-docs:
+    enabled: ${SPRINGDOC_API_DOCS_ENABLED:true}
+  swagger-ui:
+    enabled: ${SPRINGDOC_SWAGGER_UI_ENABLED:true}
+
+logging:
+  level:
+    root: INFO
+    com.example.erupt: INFO
+    # SQL 与参数会在 DEBUG 下完整打印（含敏感入参），默认关闭，排障时临时改为 DEBUG
+    com.example.erupt.repository.mapper: INFO
+  pattern:
+    console: '%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [%X{traceId:-}] %logger{36} - %msg%n'

@@ -1,0 +1,181 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.erupt.repository.mapper.NavigationMapper">
+
+    <resultMap id="BaseResultMap" type="com.example.erupt.repository.entity.Navigation">
+        <id column="id" property="id" jdbcType="VARCHAR"/>
+        <result column="navigation_img" property="navigationImg" jdbcType="VARCHAR"/>
+        <result column="navigation_name" property="navigationName" jdbcType="VARCHAR"/>
+        <result column="navigation_url" property="navigationUrl" jdbcType="VARCHAR"/>
+        <result column="cat" property="cat" jdbcType="VARCHAR"/>
+        <!-- desc 为 MySQL 保留字，列名必须用反引号包裹 -->
+        <result column="desc" property="description" jdbcType="VARCHAR"/>
+        <result column="tag" property="tag" jdbcType="VARCHAR"/>
+        <!-- create_user_id 存的是 t_user.id（varchar(64) 字符串主键），故用 VARCHAR 而非 BIGINT -->
+        <result column="create_user_id" property="createUserId" jdbcType="VARCHAR"/>
+        <result column="update_user_id" property="updateUserId" jdbcType="VARCHAR"/>
+        <!-- 仅列表查询带出：LEFT JOIN t_user 取 username，其余查询该列缺失，保持 null -->
+        <result column="create_user_name" property="createUserName" jdbcType="VARCHAR"/>
+        <result column="create_time" property="createTime" jdbcType="TIMESTAMP"/>
+        <result column="update_time" property="updateTime" jdbcType="TIMESTAMP"/>
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        id, navigation_img, navigation_name, navigation_url, cat, `desc`, tag,
+        create_user_id, update_user_id, create_time, update_time
+    </sql>
+
+    <!--
+      条件片段统一用别名 n 限定列。
+      列表查询会 LEFT JOIN t_user，而两张表都有 id / create_time / update_time，
+      裸写列名会被 MySQL 判为歧义列，因此本片段与调用方统一以 n 指代 t_navigation。
+    -->
+    <sql id="Condition_Where">
+        <where>
+            <if test="cat != null and cat != ''">
+                AND n.cat = #{cat}
+            </if>
+            <if test="tag != null and tag != ''">
+                AND n.tag = #{tag}
+            </if>
+            <!-- ESCAPE '/' 配合服务层 LikeEscape，避免用户输入的 %、_ 被当作通配符 -->
+            <if test="keyword != null and keyword != ''">
+                AND (n.navigation_name LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/'
+                OR n.`desc` LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/')
+            </if>
+        </where>
+    </sql>
+
+    <!--
+      主键由应用层生成（32 位字符串），不再用 useGeneratedKeys 依赖数据库自增回填。
+      少一次自增值的获取往返，也让 insert 的字段列表与实际写入保持一致。
+    -->
+    <!--
+      create_user_id 必须显式写入：新增与导入时由服务层从登录态取到当前用户 id，
+      漏掉这一列的话前端「创建人」列永远是空的，审计信息也就丢了。
+    -->
+    <insert id="insert" parameterType="com.example.erupt.repository.entity.Navigation">
+        INSERT INTO t_navigation (id, navigation_img, navigation_name, navigation_url, cat, `desc`, tag, create_time,
+                                  update_time, create_user_id)
+        VALUES (#{id}, #{navigationImg}, #{navigationName}, #{navigationUrl}, #{cat}, #{description}, #{tag}, #{createTime},
+                #{updateTime}, #{createUserId})
+    </insert>
+
+    <select id="selectById" resultMap="BaseResultMap" parameterType="java.lang.String">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM t_navigation
+        WHERE id = #{id}
+    </select>
+
+    <!--
+      列表列：在基础列之外多带一列 create_user_name。
+      只有列表页需要展示创建人，所以单独维护一份列清单，
+      不改 Base_Column_List（避免给详情 / 分类取数等查询都强行加上 join）。
+    -->
+    <sql id="List_With_Creator_Column_List">
+        n.id, n.navigation_img, n.navigation_name, n.navigation_url, n.cat, n.`desc`, n.tag,
+        n.create_user_id, n.update_user_id, n.create_time, n.update_time,
+        u.username AS create_user_name
+    </sql>
+
+    <!--
+      LEFT JOIN t_user 带出创建人账号：create_user_id 是一串随机字符，
+      直接展示没有意义，联表取 username 才能让人看懂是谁录的。
+
+      用 LEFT JOIN 而不是 INNER JOIN：历史数据（含本次改动前导入的）创建人为空、
+      或创建人账号已被删除时，记录本身仍须出现在列表里，只是创建人列展示占位符。
+
+      ORDER BY 必须写成 t_navigation.id：两张表都有 id 列，裸写 id 会被判为歧义列。
+
+      排序按 create_time 而不是 id：主键改成应用层生成的 UUID 后，id 不再自带先后顺序，
+      ORDER BY id 会让列表里的记录看起来是随机排列（新增的那条可能出现在任意位置）。
+      这里改为「按录入时间倒序」，同一时间戳（批量导入）再用 id 兜底保证顺序稳定。
+    -->
+    <select id="selectByCondition" resultMap="BaseResultMap">
+        SELECT
+        <include refid="List_With_Creator_Column_List"/>
+        FROM t_navigation n
+        LEFT JOIN t_user u ON u.id = n.create_user_id AND u.del_flag = '0'
+        <include refid="Condition_Where"/>
+        ORDER BY n.create_time DESC, n.id DESC
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <select id="countByCondition" resultType="long">
+        SELECT COUNT(*)
+        FROM t_navigation n
+        <include refid="Condition_Where"/>
+    </select>
+
+    <update id="updateById" parameterType="com.example.erupt.repository.entity.Navigation">
+        UPDATE t_navigation
+        <set>
+            <if test="navigationName != null">navigation_name = #{navigationName},</if>
+            <if test="navigationUrl != null">navigation_url = #{navigationUrl},</if>
+            <if test="navigationImg != null">navigation_img = #{navigationImg},</if>
+            <if test="cat != null">cat = #{cat},</if>
+            <if test="description != null">`desc` = #{description},</if>
+            <if test="tag != null">tag = #{tag},</if>
+            <if test="updateUserId != null">update_user_id = #{updateUserId},</if>
+            <if test="updateTime != null">update_time = #{updateTime},</if>
+        </set>
+        WHERE id = #{id}
+    </update>
+
+    <delete id="deleteById" parameterType="java.lang.String">
+        DELETE FROM t_navigation
+        WHERE id = #{id}
+    </delete>
+
+    <!-- 批量删除：ids 由服务层保证非空且已去重 -->
+    <delete id="deleteByIds">
+        DELETE FROM t_navigation
+        WHERE id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </delete>
+
+    <select id="countByIds" resultType="long">
+        SELECT COUNT(*)
+        FROM t_navigation
+        WHERE id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </select>
+
+    <!-- 分类去重：SQL 层 DISTINCT + 剔除空值，应用层再做 trim 后二次去重 -->
+    <select id="selectDistinctCats" resultType="java.lang.String">
+        SELECT DISTINCT TRIM(cat) AS cat
+        FROM t_navigation
+        WHERE cat IS NOT NULL
+          AND TRIM(cat) != ''
+        ORDER BY cat
+    </select>
+
+    <!--
+      分类全量：不去重，保持「录入顺序」。
+      主键改为应用层生成的 UUID 后，id 不再自带先后顺序，继续 ORDER BY id 会让新插入的记录随机散落，
+      与原先自增主键下的语义不一致。这里按 create_time 升序还原原本的语义，
+      同一时间戳（批量导入）时再用 id 兜底，保证顺序稳定。
+    -->
+    <select id="selectAllCats" resultType="java.lang.String">
+        SELECT TRIM(cat) AS cat
+        FROM t_navigation
+        WHERE cat IS NOT NULL
+          AND TRIM(cat) != ''
+        ORDER BY create_time ASC, id ASC
+    </select>
+
+    <select id="selectByCats" resultMap="BaseResultMap">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM t_navigation
+        WHERE cat IN
+        <foreach collection="cats" item="cat" open="(" separator="," close=")">
+            #{cat}
+        </foreach>
+    </select>
+</mapper>

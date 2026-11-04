@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.erupt.repository.mapper.DatabaseMapper">
+
+    <!--
+      本模块全部查询 information_schema 系统视图，零业务表写入。
+      schema / table / columnListSql 三个参数用 ${} 直接拼到 SQL 标识符位置
+      （MySQL 不支持对库/表/列名做预编译），拼接前由 service 层完成白名单校验。
+      不写 resultMap：直接用 LinkedHashMap，map-underscore-to-camel-case=true
+      会把 COLUMN_NAME / TABLE_NAME 等自动转为 columnName / tableName。
+    -->
+
+    <!--
+      所有 Schema + 表数量 + 数据总大小。
+      LEFT JOIN 的子查询一次算清表数量与体积，避免两轮 SQL。
+      COALESCE 处理 information_schema / performance_schema 这种"没有用户表"的库。
+    -->
+    <select id="selectAllSchemas" resultType="java.util.LinkedHashMap">
+        SELECT
+            s.SCHEMA_NAME                                              AS schemaName,
+            s.DEFAULT_CHARACTER_SET_NAME                               AS charset,
+            s.DEFAULT_COLLATION_NAME                                   AS collation,
+            COALESCE(t.table_count, 0)                                 AS tableCount,
+            COALESCE(t.total_size, 0)                                  AS totalSizeBytes
+        FROM information_schema.SCHEMATA s
+        LEFT JOIN (
+            SELECT TABLE_SCHEMA,
+                   COUNT(*)                                AS table_count,
+                   SUM(DATA_LENGTH + INDEX_LENGTH)         AS total_size
+            FROM information_schema.TABLES
+            WHERE TABLE_SCHEMA IS NOT NULL
+            GROUP BY TABLE_SCHEMA
+        ) t ON t.TABLE_SCHEMA = s.SCHEMA_NAME
+        ORDER BY s.SCHEMA_NAME
+    </select>
+
+    <!--
+      关键字匹配表名 + 注释的 LIKE 模糊。
+      ESCAPE '/' 配合 service 层 LikeEscape，避免用户输入的 %、_ 被当作通配符。
+    -->
+    <sql id="Table_Where">
+        <where>
+            TABLE_SCHEMA = #{schema}
+            <if test="keyword != null and keyword != ''">
+                AND (TABLE_NAME LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/'
+                OR TABLE_COMMENT LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/')
+            </if>
+        </where>
+    </sql>
+
+    <select id="selectTables" resultType="java.util.LinkedHashMap">
+        SELECT TABLE_NAME, TABLE_COMMENT, TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH,
+               ENGINE, TABLE_COLLATION, CREATE_TIME
+        FROM information_schema.TABLES
+        <include refid="Table_Where"/>
+        ORDER BY TABLE_NAME
+        LIMIT #{offset}, #{limit}
+    </select>
+
+    <select id="countTables" resultType="long">
+        SELECT COUNT(*)
+        FROM information_schema.TABLES
+        <include refid="Table_Where"/>
+    </select>
+
+    <select id="selectColumns" resultType="java.util.LinkedHashMap">
+        SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY,
+               COLUMN_DEFAULT, EXTRA, COLUMN_COMMENT, ORDINAL_POSITION
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = #{schema} AND TABLE_NAME = #{table}
+        ORDER BY ORDINAL_POSITION
+    </select>
+
+    <!--
+      COUNT(*) 走精确值，InnoDB 大表会扫表——但本接口只对非系统库开放，
+      系统库本来就不允许查数据，因此这个开销可控。
+    -->
+    <select id="countTableData" resultType="long">
+        SELECT COUNT(*) FROM `${schema}`.`${table}`
+    </select>
+
+    <!--
+      任意表的数据分页。
+      columnListSql 形如 `id`, `name`，由 service 层在白名单校验后拼接传入。
+    -->
+    <select id="selectTableData" resultType="java.util.LinkedHashMap">
+        SELECT ${columnListSql}
+        FROM `${schema}`.`${table}`
+        LIMIT #{offset}, #{limit}
+    </select>
+</mapper>

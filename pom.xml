@@ -1,0 +1,235 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>4.1.1</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.example</groupId>
+    <artifactId>erupt-example</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <packaging>jar</packaging>
+    <name>erupt-example</name>
+    <description>Spring Boot + MySQL + MyBatis 分层架构示例工程</description>
+
+    <properties>
+        <java.version>26</java.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <mybatis-spring-boot.version>4.1.0</mybatis-spring-boot.version>
+        <mysql-connector.version>26.7.0</mysql-connector.version>
+        <lombok.version>1.18.44</lombok.version>
+        <mapstruct.version>1.6.3</mapstruct.version>
+        <lombok-mapstruct-binding.version>0.2.0</lombok-mapstruct-binding.version>
+        <springdoc.version>3.1.1</springdoc.version>
+        <knife4j.version>4.5.0</knife4j.version>
+    </properties>
+
+    <dependencies>
+        <!-- Web（视图层：Spring MVC + 内嵌 Tomcat） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!-- 参数校验：@Validated / Jakarta Validation -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <!--
+          WebSocket：即时通信的实时推送通道。
+          它在 spring-boot-starter 父依赖中已由 Spring Boot 统一管理版本（无需写 version）。
+          引入的是标准 jakarta.websocket + spring-websocket + spring-messaging，
+          本项目只用原生 WebSocket（未用 STOMP），因此不会引入消息代理的额外配置负担。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-websocket</artifactId>
+        </dependency>
+
+        <!--
+          BCrypt 密码哈希：只引入独立的 crypto 模块（无 Spring Security 过滤器链，
+          不会改变接口鉴权行为）。版本固定为本地已缓存的 5.7.11：
+          Spring Boot 4.1.1 管理的是 spring-security 7.1.1，本地仓库没有，
+          离线构建会失败；crypto 模块无任何传递依赖，独立可用。
+        -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-crypto</artifactId>
+            <version>5.7.11</version>
+        </dependency>
+
+        <!-- 数据层：MyBatis + Spring 事务管理（内含 spring-boot-starter-jdbc） -->
+        <dependency>
+            <groupId>org.mybatis.spring.boot</groupId>
+            <artifactId>mybatis-spring-boot-starter</artifactId>
+            <version>${mybatis-spring-boot.version}</version>
+        </dependency>
+
+        <!-- MySQL 驱动 -->
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <version>${mysql-connector.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!--
+          Redis：分布式缓存与分布式锁。
+          版本由 parent(4.1.1) 统一管理，不要在此写 <version>，
+          否则可能与 Spring Boot 4.1.1 的其他模块用错的传递依赖版本。
+          客户端默认 Lettuce（响应式、线程安全，Spring Boot 2.x 起取代 Jedis）。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
+        <!--
+          Lettuce 连接池底层依赖 commons-pool2。
+          starter 不引入它（对 Lettuce 是可选依赖），但只要在 application.yml 里开了
+          spring.data.redis.lettuce.pool.enabled=true，缺了它就会在启动阶段抛
+          NoClassDefFoundError: org/apache/commons/pool2/impl/GenericObjectPoolConfig，
+          表现为整个 ApplicationContext 加载失败（不只是 Redis 用不了）。
+          版本由 parent 管理，不要写死。
+        -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-pool2</artifactId>
+        </dependency>
+
+        <!--
+          富文本净化：知识与正文来自运营人员录入的 HTML（UEditor），
+          不做白名单过滤就等于允许任何人往知识库里塞 <script>。
+          jsoup 用「白名单」方式重建 DOM，比正则替换可靠——正则很难覆盖
+          onclick、javascript: 伪协议、大小写/实体编码绕过这些变体。
+          版本固定：本地仓库已缓存 1.19.1，离线构建可用。
+        -->
+        <dependency>
+            <groupId>org.jsoup</groupId>
+            <artifactId>jsoup</artifactId>
+            <version>1.19.1</version>
+        </dependency>
+
+        <!-- 测试 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mybatis.spring.boot</groupId>
+            <artifactId>mybatis-spring-boot-starter-test</artifactId>
+            <version>${mybatis-spring-boot.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Lombok：编译期生成 getter/setter/构造器/日志对象，消除样板代码（provided，不进运行包） -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <version>${lombok.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- MapStruct：编译期生成 Entity/VO 之间的属性映射实现，字段变更不会漏映射 -->
+        <dependency>
+            <groupId>org.mapstruct</groupId>
+            <artifactId>mapstruct</artifactId>
+            <version>${mapstruct.version}</version>
+        </dependency>
+
+        <!-- SpringDoc / OpenAPI：扫描 Controller 自动生成接口文档与 Swagger UI 调试页 -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>${springdoc.version}</version>
+        </dependency>
+
+        <!--
+          Knife4j（作者 xiaoymin）：Swagger UI 的国产增强界面，访问 /doc.html。
+          【注意】这里用的是 knife4j-openapi3-ui（纯静态资源包，无 Java 类、无自动配置），
+          不要换成 knife4j-openapi3-spring-boot-starter —— 后者会强制引入 springdoc 1.x 的
+          springdoc-openapi-ui，与上面 springdoc 3.x 及 Spring Boot 4 冲突导致启动失败。
+          规范仍由 springdoc 生成（/v3/api-docs），Knife4j 只负责展示与调试。
+        -->
+        <dependency>
+            <groupId>com.github.xiaoymin</groupId>
+            <artifactId>knife4j-openapi3-ui</artifactId>
+            <version>${knife4j.version}</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+            </resource>
+            <resource>
+                <directory>src/main/java</directory>
+                <includes>
+                    <include>**/*.xml</include>
+                </includes>
+            </resource>
+        </resources>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <!--
+                      release 19：产出的 .class 主版本号为 63（Java 19），可运行在 JDK 19 及以上。
+                      该选项只限制 JDK 平台 API 与字节码版本，第三方库（Spring/MyBatis）不受影响。
+                    -->
+                    <release>19</release>
+                    <!--
+                      Lombok 与 MapStruct 共存时必须显式声明注解处理器及其顺序：
+                      lombok → mapstruct-processor → lombok-mapstruct-binding。
+                      缺少 binding 时 MapStruct 会先于 Lombok 生成 getter 运行，
+                      导致"找不到属性"的编译失败，这是两者同时使用最常见的坑。
+                    -->
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                            <version>${lombok.version}</version>
+                        </path>
+                        <path>
+                            <groupId>org.mapstruct</groupId>
+                            <artifactId>mapstruct-processor</artifactId>
+                            <version>${mapstruct.version}</version>
+                        </path>
+                        <path>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok-mapstruct-binding</artifactId>
+                            <version>${lombok-mapstruct-binding.version}</version>
+                        </path>
+                    </annotationProcessorPaths>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <!--
+                      显式指定主类，不依赖插件自动扫描。
+
+                      原因：增量构建时 target/ 下可能残留上一次的 fat jar（已含 BOOT-INF），
+                      而本次 jar 插件未重新生成，repackage 拿到的输入jar 结构异常，
+                      自动查找 main 方法会失败并报：
+                        Unable to find main class
+                      显式声明后，无论输入状态如何都能确定启动类。
+                    -->
+                    <mainClass>com.example.erupt.EruptExampleApplication</mainClass>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

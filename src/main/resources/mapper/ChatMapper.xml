@@ -1,0 +1,225 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.erupt.repository.mapper.ChatMapper">
+
+    <!-- ==================== 会话 ==================== -->
+
+    <insert id="insertConversation">
+        INSERT INTO t_chat_conversation
+            (id, conv_type, biz_key, conv_name, conv_avatar, owner_id,
+             last_msg_id, last_msg_time, del_flag, create_by, create_time, update_time)
+        VALUES
+            (#{id}, #{convType}, #{bizKey}, #{convName}, #{convAvatar}, #{ownerId},
+             #{lastMsgId}, #{lastMsgTime}, '0', #{createBy}, NOW(), NOW())
+    </insert>
+
+    <select id="selectConversationByBizKey" resultType="com.example.erupt.repository.entity.ChatConversation">
+        SELECT id, conv_type AS convType, biz_key AS bizKey, conv_name AS convName,
+               conv_avatar AS convAvatar, owner_id AS ownerId,
+               last_msg_id AS lastMsgId, last_msg_time AS lastMsgTime,
+               del_flag AS delFlag, create_by AS createBy, update_by AS updateBy,
+               create_time AS createTime, update_time AS updateTime
+        FROM t_chat_conversation
+        WHERE biz_key = #{bizKey} AND del_flag = '0'
+        LIMIT 1
+    </select>
+
+    <select id="selectConversationById" resultType="com.example.erupt.repository.entity.ChatConversation">
+        SELECT id, conv_type AS convType, biz_key AS bizKey, conv_name AS convName,
+               conv_avatar AS convAvatar, owner_id AS ownerId,
+               last_msg_id AS lastMsgId, last_msg_time AS lastMsgTime,
+               del_flag AS delFlag, create_by AS createBy, update_by AS updateBy,
+               create_time AS createTime, update_time AS updateTime
+        FROM t_chat_conversation
+        WHERE id = #{id} AND del_flag = '0'
+        LIMIT 1
+    </select>
+
+    <update id="updateConversationLastMsg">
+        UPDATE t_chat_conversation
+        SET last_msg_id = #{lastMsgId}, last_msg_time = #{lastMsgTime}
+        WHERE id = #{id}
+    </update>
+
+    <!--
+      会话列表：以"我"为起点，左联出对方成员（peer）再联用户信息。
+      单聊时 peer 只有一个，群聊时会重复多行——群聊保留 peer 为空，由 conv_name 展示。
+    -->
+    <select id="selectConversationsByUser" resultType="java.util.LinkedHashMap">
+        SELECT c.id                        AS id,
+               c.conv_type                 AS convType,
+               c.conv_name                 AS convName,
+               c.conv_avatar               AS convAvatar,
+               c.last_msg_id               AS lastMsgId,
+               c.last_msg_time             AS lastMsgTime,
+               m.unread_count              AS unreadCount,
+               (SELECT m2.content FROM t_chat_message m2 WHERE m2.id = c.last_msg_id) AS lastContent,
+               (SELECT m2.msg_type FROM t_chat_message m2 WHERE m2.id = c.last_msg_id) AS lastMsgType,
+               peer.user_id                AS peerId,
+               pu.nickname                 AS peerName,
+               pu.avatar                   AS peerAvatar,
+               pu.username                 AS peerUsername
+        FROM t_chat_member m
+                 JOIN t_chat_conversation c
+                      ON c.id = m.conversation_id AND c.del_flag = '0'
+                 LEFT JOIN t_chat_member peer
+                      ON peer.conversation_id = c.id
+                          AND peer.user_id &lt;&gt; #{userId}
+                          AND peer.del_flag = '0'
+                          AND c.conv_type = 1
+                 LEFT JOIN t_user pu
+                      ON pu.id = peer.user_id AND pu.del_flag = '0'
+        WHERE m.user_id = #{userId}
+          AND m.del_flag = '0'
+        ORDER BY c.last_msg_time DESC, c.create_time DESC
+    </select>
+
+    <!-- ==================== 成员 ==================== -->
+
+    <insert id="insertMember">
+        INSERT INTO t_chat_member
+            (id, conversation_id, user_id, member_role, last_read_msg_id,
+             unread_count, join_time, del_flag, create_by, create_time, update_time)
+        VALUES
+            (#{id}, #{conversationId}, #{userId}, #{memberRole}, #{lastReadMsgId},
+             #{unreadCount}, #{joinTime}, '0', #{createBy}, NOW(), NOW())
+    </insert>
+
+    <select id="selectMembersByConversation" resultType="com.example.erupt.repository.entity.ChatMember">
+        SELECT id, conversation_id AS conversationId, user_id AS userId,
+               member_role AS memberRole, last_read_msg_id AS lastReadMsgId,
+               unread_count AS unreadCount, join_time AS joinTime,
+               del_flag AS delFlag, create_by AS createBy,
+               create_time AS createTime, update_time AS updateTime
+        FROM t_chat_member
+        WHERE conversation_id = #{conversationId} AND del_flag = '0'
+    </select>
+
+    <select id="selectMember" resultType="com.example.erupt.repository.entity.ChatMember">
+        SELECT id, conversation_id AS conversationId, user_id AS userId,
+               member_role AS memberRole, last_read_msg_id AS lastReadMsgId,
+               unread_count AS unreadCount, join_time AS joinTime,
+               del_flag AS delFlag, create_by AS createBy,
+               create_time AS createTime, update_time AS updateTime
+        FROM t_chat_member
+        WHERE conversation_id = #{conversationId}
+          AND user_id = #{userId}
+          AND del_flag = '0'
+        LIMIT 1
+    </select>
+
+    <update id="incrMemberUnread">
+        UPDATE t_chat_member
+        SET unread_count = unread_count + 1
+        WHERE conversation_id = #{conversationId}
+          AND user_id = #{userId}
+          AND del_flag = '0'
+    </update>
+
+    <update id="clearMemberUnread">
+        UPDATE t_chat_member
+        SET unread_count    = 0,
+            last_read_msg_id = #{lastReadMsgId}
+        WHERE conversation_id = #{conversationId}
+          AND user_id = #{userId}
+          AND del_flag = '0'
+    </update>
+
+    <select id="sumUnreadByUser" resultType="int">
+        SELECT IFNULL(SUM(unread_count), 0)
+        FROM t_chat_member
+        WHERE user_id = #{userId} AND del_flag = '0'
+    </select>
+
+    <!-- ==================== 消息 ==================== -->
+
+    <insert id="insertMessage">
+        INSERT INTO t_chat_message
+            (id, conversation_id, sender_id, receiver_id, msg_type, content, attachment_id,
+             read_flag, del_flag, create_by, create_time, update_time)
+        VALUES
+            (#{id}, #{conversationId}, #{senderId}, #{receiverId}, #{msgType}, #{content}, #{attachmentId},
+             0, '0', #{createBy}, NOW(), NOW())
+    </insert>
+
+    <!-- 倒序取当前页，应用层再反转成正序展示；配合 (conversation_id, create_time) 索引 -->
+    <select id="selectMessages" resultType="java.util.LinkedHashMap">
+        SELECT msg.id              AS id,
+               msg.conversation_id AS conversationId,
+               msg.sender_id       AS senderId,
+               msg.msg_type        AS msgType,
+               msg.content         AS content,
+               msg.attachment_id   AS attachmentId,
+               att.original_name   AS attachmentName,
+               att.file_size       AS attachmentSize,
+               att.content_type    AS attachmentContentType,
+               msg.read_flag       AS readFlag,
+               msg.create_time     AS createTime,
+               sender.nickname     AS senderName,
+               sender.avatar       AS senderAvatar
+        FROM t_chat_message msg
+                 LEFT JOIN t_user sender ON sender.id = msg.sender_id AND sender.del_flag = '0'
+                 LEFT JOIN t_chat_attachment att ON att.id = msg.attachment_id AND att.del_flag = '0'
+        WHERE msg.conversation_id = #{conversationId}
+          AND msg.del_flag = '0'
+        ORDER BY msg.create_time DESC, msg.id DESC
+        LIMIT #{offset}, #{limit}
+    </select>
+
+    <select id="countMessages" resultType="long">
+        SELECT COUNT(*)
+        FROM t_chat_message
+        WHERE conversation_id = #{conversationId} AND del_flag = '0'
+    </select>
+
+    <update id="markMessagesRead">
+        UPDATE t_chat_message
+        SET read_flag = 1, read_time = NOW()
+        WHERE conversation_id = #{conversationId}
+          AND receiver_id = #{receiverId}
+          AND read_flag = 0
+          AND del_flag = '0'
+    </update>
+
+    <!--
+      未读消息按发送人聚合，用于"登录后/刷新时的消息提醒"。
+      最新一条内容用相关子查询取出——外层已 GROUP BY，直接选 content 会拿到不确定行。
+    -->
+    <select id="selectUnreadGroupBySender" resultType="java.util.LinkedHashMap">
+        SELECT msg.sender_id                     AS senderId,
+               sender.nickname                   AS senderName,
+               sender.avatar                     AS senderAvatar,
+               COUNT(*)                          AS unreadCount,
+               MAX(msg.create_time)              AS lastTime,
+               (SELECT latest.content
+                FROM t_chat_message latest
+                WHERE latest.sender_id = msg.sender_id
+                  AND latest.receiver_id = #{userId}
+                  AND latest.read_flag = 0
+                  AND latest.del_flag = '0'
+                ORDER BY latest.create_time DESC, latest.id DESC
+                LIMIT 1)                         AS lastContent,
+               MIN(msg.conversation_id)          AS conversationId
+        FROM t_chat_message msg
+                 JOIN t_user sender ON sender.id = msg.sender_id AND sender.del_flag = '0'
+        WHERE msg.receiver_id = #{userId}
+          AND msg.read_flag = 0
+          AND msg.del_flag = '0'
+        GROUP BY msg.sender_id, sender.nickname, sender.avatar
+        ORDER BY lastTime DESC
+    </select>
+
+
+    <!--
+      该附件被哪条消息引用：用于下载鉴权。
+      只有引用它的会话成员才能读文件，避免“登录了就能凭 id 遍历全部附件”。
+    -->
+    <select id="selectConversationIdByAttachment" resultType="java.lang.String">
+        SELECT conversation_id
+        FROM t_chat_message
+        WHERE attachment_id = #{attachmentId}
+          AND del_flag = '0'
+        LIMIT 1
+    </select>
+</mapper>
