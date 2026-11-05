@@ -76,11 +76,12 @@ src/main/resources/
 | 2 | `db/schema-im-menu.sql` | 即时通信三张表 + 菜单 / 角色 / 关联表 | 必需 |
 | 3 | `db/init-im-menu.sql` | 角色、菜单树、授权初始数据（会先清空 `t_menu`） | 必需 |
 | 4 | `db/schema-operation-log.sql` | 系统操作日志表 + 「系统日志」菜单（m21）及其超管授权 | 需要日志功能时 |
-| 5 | `db/migrate_knowledge_index.sql` | 知识库全文索引 `ft_knowledge_search` | 可选（关闭全文检索则不需要） |
-| 6 | `db/migrate_id_to_varchar32.sql` | 老库升级：`bigint` 主键转字符串并 `LPAD` 补零 | 仅从旧版本升级时 |
+| 5 | `db/schema-tools-menu.sql` | 「工具箱」菜单（m22）及其授权——**纯前端页面，不建表、不加接口** | 需要工具箱时 |
+| 6 | `db/migrate_knowledge_index.sql` | 知识库全文索引 `ft_knowledge_search` | 可选（关闭全文检索则不需要） |
+| 7 | `db/migrate_id_to_varchar32.sql` | 老库升级：`bigint` 主键转字符串并 `LPAD` 补零 | 仅从旧版本升级时 |
 
 ```bash
-for f in schema.sql schema-im-menu.sql init-im-menu.sql schema-operation-log.sql; do
+for f in schema.sql schema-im-menu.sql init-im-menu.sql schema-operation-log.sql schema-tools-menu.sql; do
   mysql --default-character-set=utf8mb4 -uroot -p erupt-example < "src/main/resources/db/$f"
 done
 ```
@@ -167,6 +168,9 @@ curl -X POST http://localhost:8080/api/users \
 
 > 「放行」指不参与菜单授权：`AuthInterceptor` 的匿名白名单只有 3 个（登录 / 登录前置 / 验证码），
 > 其余放行都是 `MenuAccessInterceptor` 里的路径规则，见「菜单与授权模块 › 双层防线」。
+>
+> 另有**工具箱**（`/tools`）不在上表：它是纯前端页面，**没有任何 `/api` 端点**，
+> 全部转换在浏览器本地完成，详见「工具箱模块」。
 
 ## 认证模块（t_user + Redis 会话）
 
@@ -1040,10 +1044,16 @@ IllegalStateException: 聊天附件目录 /app/uploads/chat 位于文件管理�
 | 菜单树 | 20 个节点（`m01`~`m20`），覆盖概览 / 知识库 / 导航 / 文件 / 数据库 / 接口文档 / 即时通信 / 系统管理 |
 | 授权 | 超级管理员授权全部 20 项；普通用户仅 4 项（概览、知识库、即时通信） |
 
-再执行 `db/schema-operation-log.sql` 会**追加**「系统日志」菜单 `m21`（`permission=logs`，挂在系统管理下），
-并只授给超级管理员——普通用户需要在角色管理里手工分配，否则访问 `/api/logs` 会得到 403。
+两个后续脚本会**追加**菜单，各自独立、可单独执行：
 
-验证效果（实测）：超级管理员可见 21 项（含追加的系统日志），普通用户仅 4 项；普通用户访问 `/api/knowledge` 放行、访问 `/api/databases` 或 `/api/menu/tree` 返回 403。
+| 脚本 | 追加菜单 | 默认授权 |
+|---|---|---|
+| `db/schema-operation-log.sql` | `m21` 系统日志（`permission=logs`，挂在系统管理下） | 仅超级管理员；普通用户访问 `/api/logs` 会 403，需在角色管理里手工分配 |
+| `db/schema-tools-menu.sql` | `m22` 工具箱（`permission=tools`，顶级菜单 `/tools`） | 超级管理员 + 普通用户（通用工具，无敏感数据） |
+
+验证效果（实测）：超级管理员可见全部菜单；按初始脚本，普通用户默认 5 个节点
+（概览、知识库、即时通信、工具箱 + 对应父目录），可用「角色管理」按需追加。
+普通用户访问 `/api/knowledge` 放行，访问 `/api/databases` 或 `/api/menu/tree` 返回 403（均不在其授权内）。
 
 ### 文件清单
 
@@ -1277,6 +1287,57 @@ curl 'http://localhost:8080/api/logs?result=0&startTime=2026-11-04%2016:00:00&en
 | 建表与菜单 | `resources/db/schema-operation-log.sql` |
 | 前端 | `views/system/OperationLogView.vue`、`api/log.ts` |
 | 单元测试 | `src/test/java/com/example/erupt/config/OperationLogInterceptorTest.java`、`service/impl/OperationLogServiceImplTest.java` |
+
+
+## 工具箱模块（纯前端，无后端接口、无数据表）
+
+一个页面装七个日常小工具，全部在浏览器里算完：
+
+| 工具 | 输入 → 输出 | 说明 |
+|---|---|---|
+| JSON 格式化 | JSON → 美化 / 压缩 | 解析失败给出行列号；缩进可选 2 空格 / 4 空格 / 压缩成一行 |
+| JSON ↔ YAML | 双向 | 基于 `js-yaml`，配置文件搬运的常用通道 |
+| JSON 转 TS 类型 | JSON 样例 → `export interface …` | 嵌套对象自动生成子接口并按结构去重；中文键名加引号并留原键注释 |
+| Base64 编解码 | 文本 ↔ Base64 | UTF-8 安全（中文不乱码）；非法输入明确报错而不是吐乱码 |
+| URL 编解码 | 文本 ↔ `%E4%BD%A0…` | `+` 按空格处理 |
+| 时间戳转换 | 秒 / 毫秒 ↔ 日期 | 同时给本地时间与 UTC ISO 两种形态 |
+| UUID 生成 | — → v4 UUID | 一次 1 / 5 / 10 / 50 个 |
+
+### 为什么不做成后端接口
+
+转换是无状态的纯计算，搬到服务端只会多三样东西：一次网络往返、一份可能带业务数据的请求日志、
+以及一个需要鉴权的接口。放在浏览器里，**用户贴进来的 JSON（可能含手机号、密钥、内部报文）根本不出这台机器**。
+
+`t_menu` 里那一行菜单只用于侧边栏显隐与前端路由守卫——`MenuAccessInterceptor` 只拦 `/api/**`，
+本页没有任何 `/api` 调用，所以 `permission=tools` 不涉及任何接口鉴权，也不需要配 mock 穿透。
+
+### 交互约定
+
+- **输入即转换**（250ms 防抖），没有「转换」按钮；解析失败直接显示中文原因，JSON 还会换算成行列号
+- **空输入不报错**：刚进页面或切到别的工具时显示空态，而不是先甩一条红字
+- **上屏**：把输出搬回输入，支持链式转换（先格式化 → 再转 YAML → 再生成 TS 类型）
+- **状态按工具隔离**：每个工具的输入与选项分别保存，来回切换不互相覆盖；统一持久化在 `localStorage`，刷新不丢
+- 复制走 `navigator.clipboard`，非安全上下文（http）自动退回 `execCommand`
+
+### 加一个工具怎么改
+
+只动 `config/dataTools.ts`：在 `DATA_TOOLS` 里加一项（`id / name / desc / category / icon / options / run`），
+左侧导航与工作区自动适配，`ToolsView.vue` 零改动。`run` 是纯函数，失败时 `throw new Error(中文原因)` 即可。
+
+### 文件清单
+
+| 层级 | 文件路径 |
+|---|---|
+| 页面 | `views/tools/ToolsView.vue` |
+| 工具注册表 | `config/dataTools.ts`（声明式描述：选项、示例、执行函数） |
+| 纯转换函数 | `utils/converters.ts`（不碰 DOM、不发请求） |
+| 路由 | `router/index.ts`（`/tools`，`name: tools`） |
+| 菜单与授权 | `resources/db/schema-tools-menu.sql` |
+| 新增依赖 | `js-yaml@4` + `@types/js-yaml`（仅 YAML 互转用到） |
+
+实测（2026-11-05）：七个工具全部通过——坏 JSON 报「第 1 行第 3 列附近」、YAML 双向互转、
+TS 生成含嵌套 `author: Author`、UUID 10 条均为合法 v4、时间戳秒级往返、Base64 中文往返一致、
+URL 解码还原中文；移动端 390px 无横向溢出、导航转为横向滚动条。
 
 
 ## 约定说明
