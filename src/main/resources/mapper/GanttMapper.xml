@@ -1,0 +1,395 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.erupt.repository.mapper.GanttMapper">
+
+    <resultMap id="PlanResultMap" type="com.example.erupt.repository.entity.GanttPlan">
+        <id column="id" property="id" jdbcType="VARCHAR"/>
+        <result column="plan_name" property="planName" jdbcType="VARCHAR"/>
+        <result column="plan_desc" property="planDesc" jdbcType="VARCHAR"/>
+        <result column="start_date" property="startDate" jdbcType="DATE"/>
+        <result column="end_date" property="endDate" jdbcType="DATE"/>
+        <result column="status" property="status" jdbcType="VARCHAR"/>
+        <result column="del_flag" property="delFlag" jdbcType="CHAR"/>
+        <result column="create_by" property="createBy" jdbcType="VARCHAR"/>
+        <result column="update_by" property="updateBy" jdbcType="VARCHAR"/>
+        <result column="create_time" property="createTime" jdbcType="TIMESTAMP"/>
+        <result column="update_time" property="updateTime" jdbcType="TIMESTAMP"/>
+    </resultMap>
+
+    <!-- 计划 + 统计。继承 GanttPlan 的子类，父类属性走上面的 resultMap 语义，这里补 4 个聚合列 -->
+    <resultMap id="PlanRowResultMap" type="com.example.erupt.repository.mapper.GanttMapper$GanttPlanRow"
+               extends="PlanResultMap">
+        <result column="task_count" property="taskCount" jdbcType="INTEGER"/>
+        <result column="milestone_count" property="milestoneCount" jdbcType="INTEGER"/>
+        <result column="done_count" property="doneCount" jdbcType="INTEGER"/>
+        <result column="avg_progress" property="avgProgress" jdbcType="INTEGER"/>
+        <result column="owner_name" property="ownerName" jdbcType="VARCHAR"/>
+    </resultMap>
+
+    <resultMap id="TaskResultMap" type="com.example.erupt.repository.entity.GanttTask">
+        <id column="id" property="id" jdbcType="VARCHAR"/>
+        <result column="plan_id" property="planId" jdbcType="VARCHAR"/>
+        <result column="parent_id" property="parentId" jdbcType="VARCHAR"/>
+        <result column="task_name" property="taskName" jdbcType="VARCHAR"/>
+        <result column="task_desc" property="taskDesc" jdbcType="VARCHAR"/>
+        <result column="start_date" property="startDate" jdbcType="DATE"/>
+        <result column="end_date" property="endDate" jdbcType="DATE"/>
+        <result column="progress" property="progress" jdbcType="INTEGER"/>
+        <result column="status" property="status" jdbcType="VARCHAR"/>
+        <result column="assignee" property="assignee" jdbcType="VARCHAR"/>
+        <result column="priority" property="priority" jdbcType="INTEGER"/>
+        <result column="is_milestone" property="isMilestone" jdbcType="INTEGER"/>
+        <result column="color" property="color" jdbcType="VARCHAR"/>
+        <result column="sort_num" property="sortNum" jdbcType="INTEGER"/>
+        <result column="del_flag" property="delFlag" jdbcType="CHAR"/>
+        <result column="create_by" property="createBy" jdbcType="VARCHAR"/>
+        <result column="update_by" property="updateBy" jdbcType="VARCHAR"/>
+        <result column="create_time" property="createTime" jdbcType="TIMESTAMP"/>
+        <result column="update_time" property="updateTime" jdbcType="TIMESTAMP"/>
+    </resultMap>
+
+    <resultMap id="DependencyResultMap" type="com.example.erupt.repository.entity.GanttDependency">
+        <id column="id" property="id" jdbcType="VARCHAR"/>
+        <result column="plan_id" property="planId" jdbcType="VARCHAR"/>
+        <result column="from_task_id" property="fromTaskId" jdbcType="VARCHAR"/>
+        <result column="to_task_id" property="toTaskId" jdbcType="VARCHAR"/>
+        <result column="dep_type" property="depType" jdbcType="VARCHAR"/>
+        <result column="lag_days" property="lagDays" jdbcType="INTEGER"/>
+        <result column="create_by" property="createBy" jdbcType="VARCHAR"/>
+        <result column="create_time" property="createTime" jdbcType="TIMESTAMP"/>
+    </resultMap>
+
+    <!-- ==================== 计划 ==================== -->
+
+    <insert id="insertPlan" parameterType="com.example.erupt.repository.entity.GanttPlan">
+        INSERT INTO `t_gantt_plan`
+            (`id`, `plan_name`, `plan_desc`, `start_date`, `end_date`, `status`,
+             `del_flag`, `create_by`, `update_by`, `create_time`, `update_time`)
+        VALUES
+            (#{id}, #{planName}, #{planDesc}, #{startDate}, #{endDate}, #{status},
+             '0', #{createBy}, #{updateBy}, NOW(3), NOW(3))
+    </insert>
+
+    <!--
+      更新策略：必填字段（名称 / 日期 / 状态）由服务层补全后写入；`plan_desc` 直接赋值，
+      null 就写 NULL。它曾经写成 <if test="planDesc != null">，结果「清空描述」永远保存不上——
+      接口返回 200、前端提示已保存，回读还是旧描述，这类静默失败最难排查。
+    -->
+    <update id="updatePlan" parameterType="com.example.erupt.repository.entity.GanttPlan">
+        UPDATE `t_gantt_plan`
+        <set>
+            <if test="planName != null">`plan_name` = #{planName},</if>
+            `plan_desc` = #{planDesc},
+            <if test="startDate != null">`start_date` = #{startDate},</if>
+            <if test="endDate != null">`end_date` = #{endDate},</if>
+            <if test="status != null">`status` = #{status},</if>
+            <if test="updateBy != null">`update_by` = #{updateBy},</if>
+            `update_time` = NOW(3)
+        </set>
+        WHERE `id` = #{id} AND `del_flag` = '0'
+    </update>
+
+    <update id="softDeletePlan">
+        UPDATE `t_gantt_plan`
+        SET `del_flag` = '1', `update_by` = #{updateBy}, `update_time` = NOW(3)
+        WHERE `id` = #{id} AND `del_flag` = '0'
+    </update>
+
+    <select id="selectPlanById" resultMap="PlanResultMap">
+        SELECT id, plan_name, plan_desc, start_date, end_date, status, del_flag,
+               create_by, update_by, create_time, update_time
+        FROM `t_gantt_plan`
+        WHERE `id` = #{id} AND `del_flag` = '0'
+    </select>
+
+    <!--
+      计划列表 + 聚合统计。
+      GROUP BY 只写 p.id：MySQL 8 能识别「按主键分组」的函数依赖，p.* 可直接取，
+      不必把 11 个列名全塞进 GROUP BY。若换成非主键列分组，ONLY_FULL_GROUP_BY 会报错。
+      平均进度只统计普通任务（里程碑不参与）：里程碑没有"进度"的语义，
+      把它当 0% 会把整体完成度无谓拉低。
+    -->
+    <select id="selectPlans" resultMap="PlanRowResultMap">
+        SELECT p.id, p.plan_name, p.plan_desc, p.start_date, p.end_date, p.status, p.del_flag,
+               p.create_by, p.update_by, p.create_time, p.update_time,
+               COALESCE(u.nickname, u.username, p.create_by) AS owner_name,
+               COALESCE(SUM(CASE WHEN t.is_milestone = 0 THEN 1 ELSE 0 END), 0) AS task_count,
+               COALESCE(SUM(CASE WHEN t.is_milestone = 1 THEN 1 ELSE 0 END), 0) AS milestone_count,
+               COALESCE(SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END), 0) AS done_count,
+               COALESCE(ROUND(AVG(CASE WHEN t.is_milestone = 0 THEN t.progress END)), 0) AS avg_progress
+        FROM `t_gantt_plan` p
+        LEFT JOIN `t_gantt_task` t ON t.plan_id = p.id AND t.del_flag = '0'
+        <!-- 用户表按主键 1:1 关联，不会放大任务行数、影响上面的聚合 -->
+        LEFT JOIN `t_user` u ON u.id = p.create_by
+        <where>
+            p.del_flag = '0'
+            <!-- 数据范围：非超管只给自己的。用参数而不是子查询，角色一次请求内不会变 -->
+            <if test="ownerId != null and ownerId != ''">
+                AND p.create_by = #{ownerId}
+            </if>
+            <if test="keyword != null and keyword != ''">
+                AND p.plan_name LIKE CONCAT('%', #{keyword}, '%')
+            </if>
+        </where>
+        GROUP BY p.id
+        <!-- 进行中的排在已归档之前；同状态按开始日倒序，最近的计划先看到 -->
+        ORDER BY (p.status = 'archived'), p.start_date DESC, p.create_time DESC
+    </select>
+
+    <!--
+      详情页的统计。不在这里按 ownerId 过滤：调用方已经拿到行数据用它做归属校验，
+      若再传一次范围参数，两处条件不一致时（漏改一处）反而会出现「能查到但点不开」的怪象。
+    -->
+    <select id="selectPlanStat" resultMap="PlanRowResultMap">
+        SELECT p.id, p.plan_name, p.plan_desc, p.start_date, p.end_date, p.status, p.del_flag,
+               p.create_by, p.update_by, p.create_time, p.update_time,
+               COALESCE(u.nickname, u.username, p.create_by) AS owner_name,
+               COALESCE(SUM(CASE WHEN t.is_milestone = 0 THEN 1 ELSE 0 END), 0) AS task_count,
+               COALESCE(SUM(CASE WHEN t.is_milestone = 1 THEN 1 ELSE 0 END), 0) AS milestone_count,
+               COALESCE(SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END), 0) AS done_count,
+               COALESCE(ROUND(AVG(CASE WHEN t.is_milestone = 0 THEN t.progress END)), 0) AS avg_progress
+        FROM `t_gantt_plan` p
+        LEFT JOIN `t_gantt_task` t ON t.plan_id = p.id AND t.del_flag = '0'
+        LEFT JOIN `t_user` u ON u.id = p.create_by
+        WHERE p.id = #{planId} AND p.del_flag = '0'
+        GROUP BY p.id
+    </select>
+
+    <!-- ==================== 任务 ==================== -->
+
+    <insert id="insertTask" parameterType="com.example.erupt.repository.entity.GanttTask">
+        INSERT INTO `t_gantt_task`
+            (`id`, `plan_id`, `parent_id`, `task_name`, `task_desc`, `start_date`, `end_date`,
+             `progress`, `status`, `assignee`, `priority`, `is_milestone`, `color`, `sort_num`,
+             `del_flag`, `create_by`, `update_by`, `create_time`, `update_time`)
+        VALUES
+            (#{id}, #{planId}, #{parentId}, #{taskName}, #{taskDesc}, #{startDate}, #{endDate},
+             #{progress}, #{status}, #{assignee}, #{priority}, #{isMilestone}, #{color}, #{sortNum},
+             '0', #{createBy}, #{updateBy}, NOW(3), NOW(3))
+    </insert>
+
+    <!--
+      可清空字段（父任务 / 说明 / 负责人 / 颜色）不加 <if>：null 直接写 NULL。
+      编辑弹窗每次都提交完整表单，用「null = 不修改」会让「清空负责人」「取消分组」
+      这类操作静默失败——接口 200、界面提示已保存、回读还是旧值。
+      排序号是服务端维护的，仍然保持 null 不更新。
+    -->
+    <update id="updateTask" parameterType="com.example.erupt.repository.entity.GanttTask">
+        UPDATE `t_gantt_task`
+        <set>
+            `parent_id` = #{parentId},
+            <if test="taskName != null">`task_name` = #{taskName},</if>
+            `task_desc` = #{taskDesc},
+            <if test="startDate != null">`start_date` = #{startDate},</if>
+            <if test="endDate != null">`end_date` = #{endDate},</if>
+            <if test="progress != null">`progress` = #{progress},</if>
+            <if test="status != null">`status` = #{status},</if>
+            `assignee` = #{assignee},
+            <if test="priority != null">`priority` = #{priority},</if>
+            <if test="isMilestone != null">`is_milestone` = #{isMilestone},</if>
+            `color` = #{color},
+            <if test="sortNum != null">`sort_num` = #{sortNum},</if>
+            <if test="updateBy != null">`update_by` = #{updateBy},</if>
+            `update_time` = NOW(3)
+        </set>
+        WHERE `id` = #{id} AND `del_flag` = '0'
+    </update>
+
+    <update id="softDeleteTask">
+        UPDATE `t_gantt_task`
+        SET `del_flag` = '1', `update_by` = #{updateBy}, `update_time` = NOW(3)
+        WHERE `id` = #{id} AND `del_flag` = '0'
+    </update>
+
+    <update id="softDeleteTasksByPlan">
+        UPDATE `t_gantt_task`
+        SET `del_flag` = '1', `update_by` = #{updateBy}, `update_time` = NOW(3)
+        WHERE `plan_id` = #{planId} AND `del_flag` = '0'
+    </update>
+
+    <select id="selectTaskById" resultMap="TaskResultMap">
+        SELECT * FROM `t_gantt_task` WHERE `id` = #{id} AND `del_flag` = '0'
+    </select>
+
+    <!-- 同层按 sort_num，再按开始日兜底：排序号相同的任务也要有稳定顺序，否则每次渲染行序会跳 -->
+    <select id="selectTasksByPlan" resultMap="TaskResultMap">
+        SELECT * FROM `t_gantt_task`
+        WHERE `plan_id` = #{planId} AND `del_flag` = '0'
+        ORDER BY `sort_num` ASC, `start_date` ASC, `create_time` ASC
+    </select>
+
+    <select id="selectChildren" resultMap="TaskResultMap">
+        SELECT * FROM `t_gantt_task`
+        WHERE `parent_id` = #{parentId} AND `del_flag` = '0'
+        ORDER BY `sort_num` ASC
+    </select>
+
+    <select id="selectMaxSortNum" resultType="int">
+        SELECT COALESCE(MAX(`sort_num`), 0) FROM `t_gantt_task`
+        WHERE `plan_id` = #{planId} AND `del_flag` = '0'
+        <choose>
+            <when test="parentId != null and parentId != ''">
+                AND `parent_id` = #{parentId}
+            </when>
+            <otherwise>
+                AND `parent_id` IS NULL
+            </otherwise>
+        </choose>
+    </select>
+
+    <!-- ==================== 依赖 ==================== -->
+
+    <insert id="insertDependency" parameterType="com.example.erupt.repository.entity.GanttDependency">
+        INSERT INTO `t_gantt_dependency`
+            (`id`, `plan_id`, `from_task_id`, `to_task_id`, `dep_type`, `lag_days`,
+             `del_flag`, `create_by`, `update_by`, `create_time`, `update_time`)
+        VALUES
+            (#{id}, #{planId}, #{fromTaskId}, #{toTaskId}, #{depType}, #{lagDays},
+             '0', #{createBy}, #{createBy}, NOW(3), NOW(3))
+    </insert>
+
+    <!--
+      依赖一律软删（del_flag='1'）：删任务 / 删计划时会连带删除它参与过的依赖，
+      硬删之后这些关系就彻底没了，误删一个任务等于丢掉整条链路的记录。
+      唯一性由生成列 `alive_from_to` 保证——已删除记录该列为 NULL，不参与唯一约束，
+      所以同一对任务可以「删了再建」，不会撞键。
+    -->
+    <update id="softDeleteDependency">
+        UPDATE `t_gantt_dependency`
+        SET `del_flag` = '1', `update_by` = #{updateBy}, `update_time` = NOW(3)
+        WHERE `id` = #{id} AND `del_flag` = '0'
+    </update>
+
+    <select id="selectDependencyById" resultMap="DependencyResultMap">
+        SELECT `id`, `plan_id`, `from_task_id`, `to_task_id`, `dep_type`, `lag_days`,
+               `del_flag`, `create_by`, `update_by`, `create_time`, `update_time`
+        FROM `t_gantt_dependency`
+        WHERE `id` = #{id} AND `del_flag` = '0'
+    </select>
+
+    <select id="selectDependencyByPair" resultMap="DependencyResultMap">
+        SELECT `id`, `plan_id`, `from_task_id`, `to_task_id`, `dep_type`, `lag_days`,
+               `del_flag`, `create_by`, `update_by`, `create_time`, `update_time`
+        FROM `t_gantt_dependency`
+        WHERE `from_task_id` = #{fromTaskId} AND `to_task_id` = #{toTaskId} AND `del_flag` = '0'
+    </select>
+
+    <!--
+      取某计划的依赖时内连任务，过滤掉「任务已被软删但依赖还在」的脏数据：
+      软删任务会同步软删依赖，但历史数据或并发操作仍可能留下悬空记录，
+      直接返回会让前端画出一条指向不存在任务的线。
+    -->
+    <select id="selectDependenciesByPlan" resultMap="DependencyResultMap">
+        SELECT d.`id`, d.`plan_id`, d.`from_task_id`, d.`to_task_id`, d.`dep_type`, d.`lag_days`,
+               d.`del_flag`, d.`create_by`, d.`update_by`, d.`create_time`, d.`update_time`
+        FROM `t_gantt_dependency` d
+        INNER JOIN `t_gantt_task` f ON f.id = d.from_task_id AND f.del_flag = '0'
+        INNER JOIN `t_gantt_task` t ON t.id = d.to_task_id AND t.del_flag = '0'
+        WHERE d.plan_id = #{planId} AND d.del_flag = '0'
+        ORDER BY d.create_time ASC
+    </select>
+
+    <update id="softDeleteDependenciesByTask">
+        UPDATE `t_gantt_dependency`
+        SET `del_flag` = '1', `update_by` = #{updateBy}, `update_time` = NOW(3)
+        WHERE `del_flag` = '0' AND (`from_task_id` = #{taskId} OR `to_task_id` = #{taskId})
+    </update>
+
+    <update id="softDeleteDependenciesByPlan">
+        UPDATE `t_gantt_dependency`
+        SET `del_flag` = '1', `update_by` = #{updateBy}, `update_time` = NOW(3)
+        WHERE `plan_id` = #{planId} AND `del_flag` = '0'
+    </update>
+
+    <!-- ==================== 恢复（针对软删数据） ==================== -->
+
+    <select id="selectDeletedPlan" resultMap="PlanResultMap">
+        SELECT * FROM `t_gantt_plan` WHERE `id` = #{id} AND `del_flag` = '1'
+    </select>
+
+    <select id="selectDeletedTask" resultMap="TaskResultMap">
+        SELECT * FROM `t_gantt_task` WHERE `id` = #{id} AND `del_flag` = '1'
+    </select>
+
+    <!-- 回收站：按删除时间倒序（软删会刷新 update_time，所以它就是删除时间） -->
+    <select id="selectDeletedTasksByPlan" resultMap="TaskResultMap">
+        SELECT * FROM `t_gantt_task`
+        WHERE `plan_id` = #{planId} AND `del_flag` = '1'
+        ORDER BY `update_time` DESC
+    </select>
+
+    <!-- 计划级回收站：可见范围内已删的计划，带各自已删任务数（含各级），按删除时间倒序 -->
+    <select id="selectDeletedPlans" resultMap="PlanRowResultMap">
+        SELECT p.id, p.plan_name, p.plan_desc, p.start_date, p.end_date, p.status, p.del_flag,
+               p.create_by, p.update_by, p.create_time, p.update_time,
+               COALESCE(u.nickname, u.username, p.create_by) AS owner_name,
+               (SELECT COUNT(*) FROM `t_gantt_task` t
+                 WHERE t.plan_id = p.id AND t.del_flag = '1' AND t.is_milestone = 0) AS task_count,
+               0 AS milestone_count,
+               0 AS done_count,
+               0 AS avg_progress
+        FROM `t_gantt_plan` p
+        LEFT JOIN `t_user` u ON u.id = p.create_by
+        <where>
+            p.del_flag = '1'
+            <if test="ownerId != null and ownerId != ''">
+                AND p.create_by = #{ownerId}
+            </if>
+        </where>
+        ORDER BY p.update_time DESC
+    </select>
+
+    <select id="selectDeletedChildren" resultMap="TaskResultMap">
+        SELECT * FROM `t_gantt_task`
+        WHERE `parent_id` = #{parentId} AND `del_flag` = '1'
+        ORDER BY `sort_num` ASC
+    </select>
+
+    <update id="restoreTask">
+        UPDATE `t_gantt_task`
+        SET `del_flag` = '0', `update_by` = #{updateBy}, `update_time` = NOW(3)
+        WHERE `id` = #{id} AND `del_flag` = '1'
+    </update>
+
+    <!-- 恢复计划时批量恢复其下全部任务：任务没有唯一键，一条 UPDATE 即可 -->
+    <update id="restoreTasksByPlan">
+        UPDATE `t_gantt_task`
+        SET `del_flag` = '0', `update_by` = #{updateBy}, `update_time` = NOW(3)
+        WHERE `plan_id` = #{planId} AND `del_flag` = '1'
+    </update>
+
+    <update id="restorePlan">
+        UPDATE `t_gantt_plan`
+        SET `del_flag` = '0', `update_by` = #{updateBy}, `update_time` = NOW(3)
+        WHERE `id` = #{id} AND `del_flag` = '1'
+    </update>
+
+    <select id="selectDeletedDependency" resultMap="DependencyResultMap">
+        SELECT `id`, `plan_id`, `from_task_id`, `to_task_id`, `dep_type`, `lag_days`,
+               `del_flag`, `create_by`, `update_by`, `create_time`, `update_time`
+        FROM `t_gantt_dependency`
+        WHERE `id` = #{id} AND `del_flag` = '1'
+    </select>
+
+    <select id="selectDeletedDependenciesByPlan" resultMap="DependencyResultMap">
+        SELECT `id`, `plan_id`, `from_task_id`, `to_task_id`, `dep_type`, `lag_days`,
+               `del_flag`, `create_by`, `update_by`, `create_time`, `update_time`
+        FROM `t_gantt_dependency`
+        WHERE `plan_id` = #{planId} AND `del_flag` = '1'
+        ORDER BY `create_time` ASC
+    </select>
+
+    <select id="selectDeletedDependenciesByTask" resultMap="DependencyResultMap">
+        SELECT `id`, `plan_id`, `from_task_id`, `to_task_id`, `dep_type`, `lag_days`,
+               `del_flag`, `create_by`, `update_by`, `create_time`, `update_time`
+        FROM `t_gantt_dependency`
+        WHERE `del_flag` = '1' AND (`from_task_id` = #{taskId} OR `to_task_id` = #{taskId})
+    </select>
+
+    <update id="restoreDependency">
+        UPDATE `t_gantt_dependency`
+        SET `del_flag` = '0', `update_by` = #{updateBy}, `update_time` = NOW(3)
+        WHERE `id` = #{id} AND `del_flag` = '1'
+    </update>
+
+</mapper>

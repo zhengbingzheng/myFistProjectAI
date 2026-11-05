@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.erupt.repository.mapper.AgentMapper">
+
+    <!-- ==================== 会话 ==================== -->
+
+    <sql id="Conversation_Columns">
+        c.id, c.user_id AS userId, c.title, c.model, c.del_flag AS delFlag,
+        c.create_by AS createBy, c.update_by AS updateBy,
+        c.create_time AS createTime, c.update_time AS updateTime
+    </sql>
+
+    <insert id="insertConversation">
+        INSERT INTO t_agent_conversation
+            (id, user_id, title, model, del_flag, create_by, update_by, create_time, update_time)
+        VALUES
+            (#{id}, #{userId}, #{title}, #{model}, '0', #{createBy}, #{updateBy}, NOW(3), NOW(3))
+    </insert>
+
+    <update id="touchConversation">
+        UPDATE t_agent_conversation
+        SET model = #{model}, update_by = #{updateBy}, update_time = NOW(3)
+        WHERE id = #{id} AND del_flag = '0'
+    </update>
+
+    <select id="selectConversationById" resultType="com.example.erupt.repository.entity.AgentConversation">
+        SELECT <include refid="Conversation_Columns"/>
+        FROM t_agent_conversation c
+        WHERE c.id = #{id} AND c.del_flag = '0'
+    </select>
+
+    <select id="selectConversationsByUser" resultType="com.example.erupt.repository.entity.AgentConversation">
+        SELECT <include refid="Conversation_Columns"/>
+        FROM t_agent_conversation c
+        WHERE c.user_id = #{userId} AND c.del_flag = '0'
+        ORDER BY c.update_time DESC
+        LIMIT #{limit}
+    </select>
+
+    <update id="logicDeleteConversation">
+        UPDATE t_agent_conversation
+        SET del_flag = '1', update_by = #{updateBy}, update_time = NOW(3)
+        WHERE id = #{id} AND del_flag = '0'
+    </update>
+
+    <!-- ==================== 消息 ==================== -->
+
+    <sql id="Message_Columns">
+        m.id, m.conversation_id AS conversationId, m.role, m.content, m.attachments, m.reasoning,
+        m.model, m.prompt_tokens AS promptTokens, m.completion_tokens AS completionTokens,
+        m.cost_ms AS costMs, m.create_time AS createTime
+    </sql>
+
+    <insert id="insertMessage">
+        INSERT INTO t_agent_message
+            (id, conversation_id, role, content, attachments, reasoning, model,
+             prompt_tokens, completion_tokens, cost_ms, create_time)
+        VALUES
+            (#{id}, #{conversationId}, #{role}, #{content}, #{attachments}, #{reasoning}, #{model},
+             #{promptTokens}, #{completionTokens}, #{costMs}, NOW(3))
+    </insert>
+
+    <select id="selectMessagesAsc" resultType="com.example.erupt.repository.entity.AgentMessage">
+        SELECT <include refid="Message_Columns"/>
+        FROM t_agent_message m
+        WHERE m.conversation_id = #{conversationId}
+        ORDER BY m.create_time ASC, m.id ASC
+    </select>
+
+    <select id="selectRecentMessages" resultType="com.example.erupt.repository.entity.AgentMessage">
+        SELECT <include refid="Message_Columns"/>
+        FROM t_agent_message m
+        WHERE m.conversation_id = #{conversationId}
+        ORDER BY m.create_time DESC, m.id DESC
+        LIMIT #{limit}
+    </select>
+</mapper>

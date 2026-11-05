@@ -77,11 +77,14 @@ src/main/resources/
 | 3 | `db/init-im-menu.sql` | 角色、菜单树、授权初始数据（会先清空 `t_menu`） | 必需 |
 | 4 | `db/schema-operation-log.sql` | 系统操作日志表 + 「系统日志」菜单（m21）及其超管授权 | 需要日志功能时 |
 | 5 | `db/schema-tools-menu.sql` | 「工具箱」菜单（m22）及其授权——**纯前端页面，不建表、不加接口** | 需要工具箱时 |
-| 6 | `db/migrate_knowledge_index.sql` | 知识库全文索引 `ft_knowledge_search` | 可选（关闭全文检索则不需要） |
-| 7 | `db/migrate_id_to_varchar32.sql` | 老库升级：`bigint` 主键转字符串并 `LPAD` 补零 | 仅从旧版本升级时 |
+| 6 | `db/schema-agent.sql` | 智能体两张表（会话 / 消息）+ 字典种子 `agent_config` + 菜单（m23） | 需要智能体时 |
+| 7 | `db/schema-gantt.sql` | 时间规划三张表（计划 / 任务 / 依赖）+ 菜单（m24） | 需要甘特图时 |
+| 8 | `db/migrate_gantt_dependency_soft_delete.sql` | 老库升级：依赖表加 `del_flag`，唯一键改到生成列 `alive_from_to` | 仅升级已建过甘特图表的库 |
+| 9 | `db/migrate_knowledge_index.sql` | 知识库全文索引 `ft_knowledge_search` | 可选（关闭全文检索则不需要） |
+| 10 | `db/migrate_id_to_varchar32.sql` | 老库升级：`bigint` 主键转字符串并 `LPAD` 补零 | 仅从旧版本升级时 |
 
 ```bash
-for f in schema.sql schema-im-menu.sql init-im-menu.sql schema-operation-log.sql schema-tools-menu.sql; do
+for f in schema.sql schema-im-menu.sql init-im-menu.sql schema-operation-log.sql schema-tools-menu.sql schema-agent.sql schema-gantt.sql; do
   mysql --default-character-set=utf8mb4 -uroot -p erupt-example < "src/main/resources/db/$f"
 done
 ```
@@ -150,7 +153,7 @@ curl -X POST http://localhost:8080/api/users \
 ### 接口总览（按模块）
 
 全部接口都以 `/api` 开头，统一返回 `Result` 信封；分页接口的 `data` 为 `PageResult`。
-**共 11 个视图层、84 个端点**，明细见各模块章节：
+**共 12 个视图层、94 个端点**，明细见各模块章节：
 
 | 模块 | 前缀 | 端点数 | 视图层 | 菜单权限标识 | 说明 |
 |---|---|---|---|---|---|
@@ -165,6 +168,8 @@ curl -X POST http://localhost:8080/api/users \
 | 即时通信 | `/api/chat` | 8 | `ChatController` | 放行 | 会话、消息、未读、可聊对象 |
 | 聊天附件 | `/api/chat/attachments` | 2 | `ChatAttachmentController` | 放行 | 独立存储，不复用 `t_attachment` |
 | 系统日志 | `/api/logs` | 1 | `OperationLogController` | `logs` | 只读审计查询，无写接口 |
+| 智能体 | `/api/agent` | 4 | `AgentController` | `agent` | GLM 多轮对话；会话列表 / 消息 / 删除；配置在数据字典 |
+| 时间规划 | `/api/gantt` | 10 | `GanttController` | `gantt` | 计划 / 任务 / 依赖三套 CRUD；依赖成环校验、父任务进度汇总 |
 
 > 「放行」指不参与菜单授权：`AuthInterceptor` 的匿名白名单只有 3 个（登录 / 登录前置 / 验证码），
 > 其余放行都是 `MenuAccessInterceptor` 里的路径规则，见「菜单与授权模块 › 双层防线」。
@@ -1050,9 +1055,10 @@ IllegalStateException: 聊天附件目录 /app/uploads/chat 位于文件管理�
 |---|---|---|
 | `db/schema-operation-log.sql` | `m21` 系统日志（`permission=logs`，挂在系统管理下） | 仅超级管理员；普通用户访问 `/api/logs` 会 403，需在角色管理里手工分配 |
 | `db/schema-tools-menu.sql` | `m22` 工具箱（`permission=tools`，顶级菜单 `/tools`） | 超级管理员 + 普通用户（通用工具，无敏感数据） |
+| `db/schema-agent.sql` | `m23` 智能体（`permission=agent`，顶级菜单 `/agent`） | 超级管理员 + 普通用户（按需在角色管理里收回，避免全员消耗 API 额度） |
 
-验证效果（实测）：超级管理员可见全部菜单；按初始脚本，普通用户默认 5 个节点
-（概览、知识库、即时通信、工具箱 + 对应父目录），可用「角色管理」按需追加。
+验证效果（实测）：超级管理员可见全部菜单；按初始脚本，普通用户默认 6 个节点
+（概览、知识库、即时通信、工具箱、智能体 + 对应父目录），可用「角色管理」按需追加。
 普通用户访问 `/api/knowledge` 放行，访问 `/api/databases` 或 `/api/menu/tree` 返回 403（均不在其授权内）。
 
 ### 文件清单
@@ -1340,6 +1346,198 @@ TS 生成含嵌套 `author: Author`、UUID 10 条均为合法 v4、时间戳秒�
 URL 解码还原中文；移动端 390px 无横向溢出、导航转为横向滚动条。
 
 
+## 智能体模块（t_agent_conversation + t_agent_message）
+
+对接智谱开放平台（BigModel）的 GLM-5.3 / GLM-5.3-Flash，走 **OpenAI Chat Completion 协议**：
+
+```
+POST https://open.bigmodel.cn/api/paas/v4/chat/completions
+Authorization: Bearer <API Key>
+{ "model": "glm-5.3", "messages": [ {role, content} … ], "stream": false }
+```
+
+### 配置放在数据字典里
+
+| 位置 | 字典类型 | 配置项（`label` = 项名，`value` = 值） | 默认值 |
+|---|---|---|---|
+| 系统管理 › 数据字典 | `agent_config` | `API Key` | 空——**必须自己填**，未填时对话会直接提示去哪里配 |
+| | | `chat_url` | `https://open.bigmodel.cn/api/paas/v4/chat/completions` |
+| | | `default_model` | `glm-5.3` |
+| | | `system_prompt` | 「你是 ERUP 管理系统内置助手…」，清空则不发 system 消息 |
+
+三个设计点：
+
+- **实时读取**：每轮对话都查一次字典（走 `idx_dict_type_sort_num` 索引，成本可忽略），改完即生效，不用重启；
+- **不写死 Key**：代码里没有任何 API Key 常量，也没有从 `application.yml` 读——运营改配置不需要碰代码和发布流程；
+- **注意暴露面**：字典的三个读接口对**所有登录用户**放行（各业务页都要用它把存储值翻成展示名），
+  所以 `agent_config` 里的 API Key 对任何登录用户都是可读的。这不是本模块引入的问题，
+  但把密钥放进字典会放大它——若要收紧，可改成只给超管授权并加一个「仅超管可读的类型白名单」，
+  或在 Key 旁标注「仅本系统内部使用，泄露即换」。
+
+### 接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/agent/chat` | 发一条消息（非流式，一次返回全文）；`conversationId` 不传 = 新建会话；可带 `attachmentIds` |
+| POST | `/api/agent/chat/stream` | 流式对话（SSE）：正文与思考过程逐块下发；参数 / 配置错误在建立流之前以普通 JSON 返回 |
+| GET | `/api/agent/conversations` | 当前用户的会话列表（最近对话在前，最多 100 条） |
+| GET | `/api/agent/conversations/{id}/messages` | 某会话全部消息，时间正序（含每条消息的附件元信息） |
+| DELETE | `/api/agent/conversations/{id}` | 软删除会话 |
+
+```bash
+curl -X POST http://localhost:8080/api/agent/chat \
+  -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' \
+  -d '{"content":"用一句话解释什么是数据库索引"}'
+```
+
+```json
+{
+  "code": 200, "message": "操作成功",
+  "data": {
+    "conversationId": "9f2c…", "title": "用一句话解释什么是数据库索引",
+    "userMessage": { "id": "…", "role": "user", "content": "用一句话解释什么是数据库索引",
+                     "attachments": [] },
+    "reply": { "id": "…", "role": "assistant", "content": "…Markdown…",
+               "reasoning": "…思考过程（可空）…", "model": "glm-5.3",
+               "promptTokens": 96, "completionTokens": 210, "costMs": 8342 }
+  }, "timestamp": 1793859315077
+}
+```
+
+> `userMessage` 是落库后的用户消息：前端插入的乐观气泡要用它替换，
+> 因为「附件是否被解析」（`attachments[].parsed`）只有服务端知道。
+
+### 流式输出（正文为什么要一块一块吐）
+
+`stream:false` 时上游把整篇回答攒齐才返回，页面只能干等——GLM-5.3 的思考模式始终开启，
+写一篇千字长文要一两分钟，用户看到的就是「一直在思考，然后突然出现整篇」。
+`/api/agent/chat/stream` 改为 `stream:true` 边收边转发：
+
+| SSE 事件 | data | 含义 |
+|---|---|---|
+| `reasoning` | `{"text":"增量"}` | 思考过程增量，页面显示在「思考中…」折叠块里 |
+| `delta` | `{"text":"增量"}` | 正文增量，页面按到达顺序拼进同一条气泡 |
+| `done` | `{"conversationId","title","userMessage","reply"}` | 流结束：落库后的完整结果（id / tokens / 耗时），页面用它替换流式气泡 |
+| `error` | `{"message":"提示"}` | 流建立后的失败（空回复、上游错误、超时） |
+
+四个实现要点：
+
+- **增量包一层 JSON**：模型输出里的换行若直接写进 `data:` 行，空行会被解析成事件结束，
+  前端只拿到半句话；`{"text":"…"}` 让换行变成 `\n` 转义。
+- **读上游用 JDK HttpClient**：`RestClient` 是「读完整响应体」的模型，拿不到行流；
+  `HttpResponse.BodyHandlers.ofLines()` 才能逐行读 `data:`。
+- **SSE 跑独立线程池**：`SseEmitter` 必须异步写，否则会一直占着 Tomcat 请求线程；
+  4 并发，满了直接提示「稍后再试」而不是无界排队。
+- **落库与非流式共用 `prepareChat` + `persistAssistant`**：上下文组装、附件解析、
+  消息写入只有一份实现，流式回答与刷新后回放不会出现两套结果。
+
+### 多轮对话怎么实现
+
+API 是无状态的，「上下文」必须每轮重新带上。本项目的做法：
+
+1. `user` 消息先落库（`t_agent_message`）；
+2. 从消息表取该会话**最近 20 条**（`MAX_CONTEXT_MESSAGES`），反转成正序；
+3. 若字典配了 `system_prompt`，拼在 messages 首位；
+4. 整包发给上游，`assistant` 回复落库并刷新会话 `update_time`（列表按它倒序）。
+
+前端**不回传历史**——历史由后端从库里取，避免前端伪造 `assistant` 角色注入上下文，
+也保证「页面刷新后上下文还在」。
+
+### 附件怎么处理
+
+**先说边界：GLM-5.3 官方文档明确「目前仅支持处理文本模态信息」，不能把图片当视觉输入。**
+硬塞 `image_url` 内容块只会让请求失败，所以这里不做「假装能看图」的事：
+
+| 附件类型 | 处理方式 |
+|---|---|
+| 文本类（`text/*`、json / xml / yaml / 代码 / csv / md …，按 MIME + 扩展名双判定） | 后端读正文拼进本轮 user 消息，包在 `===== 附件《name》开始/结束 =====` 之间；单文件 ≤ 32KB、单轮总计 ≤ 96KB，超出截断并注明 |
+| 图片 / PDF / Office / 压缩包等 | 只存档：消息里可见、可点开预览，但正文不进上下文；给模型追加一句「用户还附带了 xxx，你无法读取其内容，不要臆测」，避免它顺着文件名编造 |
+
+上传复用**现有**附件接口（`POST /api/attachments/upload`，未做任何改动），前端拿到 `id` 后随消息传
+`attachmentIds`；文件名 / 类型 / 大小由服务端按 id 查库，不信任前端。附件正文**不落库**（否则历史回显与
+上下文都会重复膨胀），消息表只存元信息 JSON；多轮组装时历史轮只标注「本轮附带附件：a、b」。
+界面上「未解析」的小徽标就是 `parsed=false` 的可视化——它表示模型没看到内容，不是上传失败。
+
+### 错误码怎么翻译
+
+上游是「HTTP 状态码 + 业务码」两层，直接抛给使用者没有意义，统一翻译到「该做什么」的粒度：
+
+| 上游信号 | 本系统的提示 |
+|---|---|
+| HTTP 401 / 业务码 1000、1001、1003 | 智谱 API 认证失败：去数据字典检查 API Key |
+| 业务码 1211 | 模型不存在：检查 `default_model` 取值 |
+| 业务码 1261 | 对话过长：新建会话或删旧会话 |
+| 业务码 1301 | 内容被平台安全审核拦截 |
+| HTTP 429（含 1113 欠费、1302 限流、1308/1310 额度） | 触发限流或额度限制：稍后重试 + 查余额 |
+| HTTP 5xx / 1200 / 1230 / 1234 | 上游暂时不可用：稍后重试 |
+| 网络层异常 / 读超时 | 连接智谱平台失败或超时 |
+
+**上游 401 被故意映射成 HTTP 500 返回**：前端的全局 401 处理会清 token 并跳登录页，
+若把上游认证失败当成 401 抛出，用户会被莫名登出。
+
+另有两处兼容：`<think>…</think>` 混在正文里时自动拆到 `reasoning` 字段；
+响应按 String 接收再用 Jackson 2 解析（Boot 4 的 HTTP 转换器是 Jackson 3，
+直接 `body(JsonNode.class)` 会因两套 Jackson 的 `JsonNode` 不通用而失败）。
+超时设置：连接 5s、读 180s——GLM-5.3 的思考模式始终开启，复杂问题一轮几十秒是常态。
+
+### 表结构
+
+| 表 | 作用 | 关键字段 |
+|---|---|---|
+| `t_agent_conversation` | 一行 = 一次多轮对话 | `user_id`（归属，会话仅本人可见）、`title`（首条消息前 50 字）、`model`、`del_flag` |
+| `t_agent_message` | 一行 = 一条 user / assistant 消息 | `conversation_id`、`role`、`content`（MEDIUMTEXT，存 Markdown 原文）、`attachments`（TEXT，附件元信息 JSON）、`reasoning`、`model`、`prompt_tokens` / `completion_tokens` / `cost_ms` |
+
+`attachments` 只存 `[{id,name,contentType,size,parsed}]` 这样的引用，文件本体仍归附件模块的
+`t_attachment` 管理——同一份文件在文件管理页也能看到，不做第二份存储。
+
+消息表**不设** `del_flag`：会话软删除后整段不可达，消息跟随会话生命周期；
+正文存 Markdown 原文不做 HTML 转换——渲染形态交给展示层。
+
+两张表的 `create_time` / `update_time` 用 **`DATETIME(3)` 毫秒精度**：一轮对话里 user 与 assistant
+两条消息常常在同一秒内落库，秒级精度会让 `ORDER BY create_time` 的顺序随机——
+上下文顺序错了，模型看到的就是「先回答后提问」。毫秒精度 + `NOW(3)` 写入解决这个问题。
+
+### 前端
+
+页面在「智能体」（`views/agent/AgentView.vue`）：
+
+- 左侧会话列表（新建 / 切换 / 删除，最近对话在前），**会话栏顶部右侧的「收起」按钮可折叠**，收起后入口平移到对话区头部，不会出现「关了打不开」（折叠状态记忆在 `localStorage`）；移动端会话列表收进顶部下拉；
+- 输入区是一个 3 行起的大输入框（`textarea`），底部工具条：左边附件按钮，右边模型选择 + **圆形上箭头发送按钮**（空输入 / 上传中自动禁用）；
+- 附件：选图后立刻出本地缩略图（`objectURL`），文本类附件上传完成后随消息发送；历史消息里的图片走预览接口取 `Blob` 再转 `objectURL`（`<img src>` 无法带 `Authorization` 头）；
+- 助手回复用 `marked` 渲染 Markdown、`DOMPurify` 消毒后 `v-html`——模型输出属于不可信输入，直接渲染等于把 XSS 注入权交给上游；
+- 思考过程（`reasoning`）折叠展示；每条回复下方显示「模型 · tokens · 耗时」；
+- 等待时显示「正在思考… Ns」计时（非流式，长回答需要耐心）；出错显示红色气泡，会话与已输入内容不丢，可直接重发；
+- Enter 发送 / Shift + Enter 换行，输入法组合期间回车不会误发（`isComposing` 判断）。
+
+### 文件清单
+
+| 层级 | 文件路径 |
+|---|---|
+| 视图层 | `controller/AgentController.java` |
+| 服务层 | `service/AgentService.java`、`service/impl/AgentServiceImpl.java`（上游调用 + 错误翻译 + 上下文组装） |
+| Mapper | `repository/mapper/AgentMapper.java`、`resources/mapper/AgentMapper.xml` |
+| 实体 / DTO / VO | `repository/entity/AgentConversation.java`、`AgentMessage.java`、`model/dto/AgentChatRequest.java`、`model/vo/AgentChatVO.java`、`AgentConversationVO.java`、`AgentMessageVO.java`、`AgentAttachmentVO.java` |
+| 建表与种子 | `resources/db/schema-agent.sql`（两张表 + `agent_config` 字典 + 菜单 `m23`） |
+| 附件 | 复用 `AttachmentService.getResource(id)` 只读取正文，**不改任何附件接口** |
+| 前端 | `views/agent/AgentView.vue`、`api/agent.ts`；路由 `/agent` |
+| 新增依赖 | 后端无（用 Spring 自带的 `RestClient`）；前端 `dompurify`（Markdown 消毒） |
+
+实测（2026-11-05）：菜单可见、四个接口就位；未配 Key 时返回
+「尚未配置 API Key：请到「系统管理 › 数据字典」编辑 agent_config 下的「API Key」」，
+配假 Key 时上游 401 被翻译为认证失败提示（HTTP 500，未触发登出），
+非法模型名被白名单拦下（400）；多轮上下文实测第 1/2/3 轮分别收到 2/4/6 条消息，角色序列正确；
+附件实测：文本附件正文被完整读入并包在分隔标记里、图片附件收到「无法读取其内容」的说明、
+消息表 `attachments` 元信息与 `parsed` 标记正确、刷新后历史图片仍能显示；
+浏览器实测会话栏折叠、大输入框、圆形发送按钮、模型在发送按钮左侧、上传进度与「未解析」徽标均正常，
+移动端 390px 无横向溢出。**真实对话需在数据字典里填入你的 API Key**。
+
+流式实测（2026-11-06）：一轮对话在 8.09s–10.88s 之间下发 232 个事件块（reasoning 175 块 + delta 56 块），
+`done` 里的落库正文与增量拼接逐字一致（106 字），tokens / 耗时齐全；
+页面正文长度按 0→23→96→139→153 递增，确认是渐进渲染而不是一次吐出；
+思考阶段点「停止」不产生空白回复，正文已输出后停止则已生成部分照常落库（前端 91 字 / 库中 101 字，
+差值来自断开瞬间仍在途的分片）；离开页面会主动断流，不让上游白跑。
+
+
 ## 约定说明
 
 - **主键统一为字符串**：`varchar(64)`，由应用层生成（`UUID.randomUUID()` 去横线），不用数据库自增——写入前就能拿到 id，数据合并 / 迁移时也不会撞键。人 ID 与各类引用列（`create_user_id`、`update_user_id`、`role_id`、`menu_id`、`conversation_id`、`attachment_id`…）同为 `varchar(64)`，与主键宽度对齐，避免 join 时隐式转换。
@@ -1411,3 +1609,176 @@ online.value = isChatConnected()   // 此刻 socket 还在 CONNECTING，必然 f
 对方发消息 → 本端收到推送：146ms（直连 8080）/ 168ms（经 Vite 代理）
 发送接口 HTTP 往返：171 ~ 185ms
 ```
+
+## 时间规划模块（t_gantt_plan + t_gantt_task + t_gantt_dependency）
+
+**菜单**：顶级「时间规划」（`m24`，路径 `/gantt`，`permission = gantt`），默认授权超级管理员与普通用户。
+
+**数据权限**：超级管理员可见并操作全部计划；其他用户只能看到 / 修改**自己创建**的计划及其任务、依赖。详见下文「数据权限」小节。
+
+### 数据表
+
+| 表 | 一行 = | 关键字段 |
+|---|---|---|
+| `t_gantt_plan` | 一张甘特图（一次排期） | `plan_name`、`start_date` / `end_date`（仅作初始视图范围）、`status` |
+| `t_gantt_task` | 一个任务 / 里程碑 / 分组 | `plan_id`、`parent_id`、`start_date` / `end_date`、`progress`、`status`、`assignee`、`priority`、`is_milestone`、`sort_num` |
+| `t_gantt_dependency` | 一条前后置关系 | `plan_id`、`from_task_id` → `to_task_id`、`dep_type`（FS/SS/FF/SF）、`lag_days`、`del_flag`；有效记录由生成列 `alive_from_to` 保证唯一 |
+
+### 三个设计选择与理由
+
+1. **里程碑不单独建表**，用 `is_milestone = 1` + 起止同一天表达。
+   里程碑本质是零工期任务，允许被依赖、被排序、被统计；单独建表会让依赖关系出现两套外键，甘特图也要渲染两种实体。
+   服务层强制「里程碑起止同日」，即使前端传了区间也按开始日收敛，避免画出有宽度的菱形。
+
+2. **依赖单独建表**，而不是在任务行里存 `predecessor` 字段。
+   一个任务可以有多个前置（多对多），塞进一行只能存 CSV：加不了唯一约束，删任务时也没法精确清理关联。
+
+3. **父任务的起止与进度是派生的**：有子任务时，起止取子任务的最小 / 最大日期，进度取子任务平均值，状态按「全部完成 → done / 有推进 → doing / 其余 → todo」汇总。
+   库里仍保留用户填过的值，但读取一律以子任务为准——否则改完子任务，父任务的条子还停在老位置。
+   只允许一层父子：多层会让汇总变成递归，移动端窄屏也无法阅读缩进。
+
+4. **依赖也是软删**。删任务、删计划都会连带处理它参与过的依赖；如果依赖是 `DELETE` 硬删，误删一个任务就等于丢掉整条链路的记录，事后无从追溯。
+   难点在唯一键：原来建在 `(from_task_id, to_task_id)` 上，软删后同一对任务重新建依赖会撞键，删一次就再也建不回来。
+   解法是加一个 `STORED` 生成列 `alive_from_to`——有效记录取 `from:to`，已删除记录为 `NULL`，唯一索引建在它上面：
+   MySQL 的唯一索引不约束 `NULL`，于是墓碑可以有多条、有效记录仍然唯一，「删了再建」自然成立。
+
+### 交互设计（对标 MS Project / Asana / TeamGantt）
+
+| 交互 | 做法 | 为什么 |
+|---|---|---|
+| 拖任务条改期 | 按住条子左右拖，整条平移；位移按天取整后回写起止日 | 改日期是最高频操作，弹窗填两个日期等于把 2 秒的事做成 20 秒 |
+| 拖右缘调时长 | 条子右缘 8px 把手（深灰双竖纹，hover 显形），横向拉伸；结束日不小于开始日 | 与拖整条区分开，避免「想延长却把任务挪走了」 |
+| 把手的层叠 | 把手 `z-index: 2`，必须压过任务名文字层（`z-index: 1`） | 文字层盖住把手时，事件被它截走，把手看起来「点不到」——用户拖右缘只会整条平移，反馈成「进度条拉不长也缩不短」 |
+| 三层嵌套 | 顶层分组 → 二级分组 → 任务，上限 3 层（`MAX_TASK_DEPTH`）；父任务任意层级未达上限即可 | 两层不够用（阶段 → 模块 → 任务）；再深则递归汇总与缩进渲染失控，窄屏没法读 |
+| 递归汇总 | 分组起止 = 全部后代 min/max，进度 = 后代平均，状态由后代状态归纳；二/三级分组基于子 VO 汇总值再汇总 | 用实体自身字段汇总会让二级分组带上过期日期，顶层也就跟着算错 |
+| 层级约束 | 第四层创建 400；父链上出现自己 400（成环）；有子任务的节点不能改挂到别人下面 | 环会让递归死循环；整棵子树搬家牵扯太多约束，改父只开放给叶子 |
+| 前置任务下拉 | 按树形全展开排列，子任务带 `└` 前缀、缩进、弱化字重，日期靠右灰字 | 平铺列表里各级分组和子任务混在一起，分不清谁挂在谁下面，很容易选错前置 |
+| 删除的两级入口 | 撤销横条（纯内存态，只针对刚发生的删除）+ 回收站弹窗（服务端查库里的软删记录，随时恢复） | 一切业务数据以数据库为准，前端不再自建第二数据源：横条管「马上反悔」，回收站管「事后找回」 |
+| 回收站双页签 | 「任务」挂在当前计划下，「计划」是全局的；按钮不挂 `activePlan` 条件常驻 | 删掉计划后没有选中计划，任务页签进不去——那恰恰是最需要恢复入口的时刻 |
+| 今日线 | 1px 竖线淡化到 0.45，表头日期行底部钉一枚红底「今天」小标签 | 纯红线容易和「告警」混淆，也容易被第一行任务条盖住；标签吸顶常驻，缩放切换后一眼能找到今天 |
+| 任务表格无背景 | 表头 / 侧栏 / 行 hover 全部白底，靠边框与字重分层 | 灰色块让表格看起来「有底纹」，和甘特图画布的留白不协调；行的反馈交给箭头高亮 |
+| 点击 vs 拖拽 | 位移未满一天时仍是点击（开编辑窗）；拖动过则吞掉随后的 click | `mouseup` 后浏览器还会补发 click，不复位标志就会「拖完日期变了、编辑窗也弹出来」 |
+| 分组折叠 | 分组行前的三角按钮，折叠是纯视图状态 | 任务一多，滚动找今天的成本远高于折叠；折叠分组的子任务仍参与 `used` 集合，否则会落到「孤儿兜底区」重复渲染 |
+| 悬浮提示 | 自绘 tooltip（名称 / 状态 / 日期 / 天数 / 负责人 / 进度） | 原生 `title` 有约 1 秒延迟、样式不可控，而且**拖拽时会跟着弹**，干扰操作 |
+| 依赖高亮 | 悬停任务时相关箭头变橙加粗、其余淡出；相连任务描边提亮 | 依赖一多，箭头就成了一团灰线，看不出某条任务卡在谁身上 |
+| 定位今日 | 首次拿到任务、切换缩放时把今日线滚到视口中部 | 计划跨度常有几个月，打开就停在 9 月、还要手动滚到 11 月，等于每次都在找今天 |
+
+刻意没做的：拖拽建依赖（从条子边缘拖出箭头）、关键路径、基线对比。它们要么需要额外的交互层级（拖拽建依赖与「拖条改期」在同一个热区上冲突，得靠按住某个修饰键区分），要么需要新增数据模型（基线要另存一版快照）。这三项都不是「体验不好」的主因，先把高频操作做顺。
+
+### 数据权限
+
+规则一句话：**超管看全部，其他人只看自己创建的**。判定与执行分三处：
+
+| 层 | 位置 | 做法 |
+|---|---|---|
+| 判定 | `service/DataScopeService.java` | 查 `t_user_role` 是否含 `ROLE_SUPER_ADMIN`；`dataScopeOwnerId()` 返回 `null`（不限制）或当前用户 id |
+| 列表过滤 | `GanttMapper.selectPlans(keyword, ownerId)` | `<if test="ownerId != null"> AND p.create_by = #{ownerId} </if>`，超管传 null 时条件不拼 |
+| 单条校验 | `requireAccessiblePlan / requireAccessibleTask` | 取出数据后比对 `create_by`，不一致抛 403 |
+
+四个刻意的决定：
+
+1. **归属以「计划」为单位，任务跟随其计划**。不按任务的 `create_by` 判断——超管可以在别人的计划里代建任务，
+   若按任务创建人算，这条任务对计划主人不可见、对超管可见，同一条数据两种视角，权限就说不清了。
+2. **越权返回 403 而不是伪装 404**。计划不是敏感资源，直接说「这不是你的」比让用户以为数据丢了更省沟通。
+3. **写操作与读操作同一套校验**。只做读隔离会留下「看不见但知道 id 就能改」的漏洞——`updateTask / deleteTask /
+   createDependency / deleteDependency` 全部走同一组 `requireAccessible*`。
+4. **归属标记由服务端算**（`GanttPlanVO.owned`）。前端不拿本地用户 id 去比对：刷新后用户信息可能还没加载、
+   mock 环境下压根取不到，那样会把「自己的计划」误标成别人的。
+
+角色判定只查一次、作为参数往下传，不在每条 SQL 里 `JOIN t_user_role`——角色在一次请求内不会变，
+逐条连接纯属浪费；代价是每个入口方法都必须显式取一次 `dataScopeOwnerId()`，漏传就会看到别人的数据。
+
+### 接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/gantt/plans` | 计划列表，带任务数 / 里程碑数 / 完成数 / 平均进度；**按数据范围过滤** |
+| POST | `/api/gantt/plans` | 新建计划，返回带 id 的 VO |
+| PUT | `/api/gantt/plans/{id}` | 修改。**提交即完整覆盖**：可清空字段（描述）传 `null` 表示清空 |
+| DELETE | `/api/gantt/plans/{id}` | 级联软删任务、清理依赖 |
+| GET | `/api/gantt/plans/{id}` | **甘特图详情**：计划 + 任务 + 依赖一次返回 |
+| POST | `/api/gantt/plans/{planId}/tasks` | 新建任务，返回新任务 id（前端接着建依赖要用） |
+| PUT | `/api/gantt/tasks/{id}` | 修改任务。**提交即完整覆盖**：父任务 / 说明 / 负责人 / 颜色传 `null` 表示清空 |
+| DELETE | `/api/gantt/tasks/{id}` | 删除任务；`?cascade=true` 时连同子任务一起删（前端二次确认后才传） |
+| POST | `/api/gantt/dependencies` | 新增依赖 |
+| DELETE | `/api/gantt/dependencies/{id}` | 删除依赖（软删，记录保留） |
+| POST | `/api/gantt/plans/{id}/restore` | 恢复软删计划：连同其下全部任务与依赖 |
+| POST | `/api/gantt/tasks/{id}/restore` | 恢复软删任务（按家族：父 / 兄弟 / 子任务一起回来），附带可恢复的依赖 |
+| POST | `/api/gantt/dependencies/{id}/restore` | 恢复单条软删依赖；两端任务与计划都必须为有效状态 |
+| GET | `/api/gantt/plans/{id}/deleted-tasks` | 回收站：计划下已删任务列表（按删除时间倒序，带已删后代数） |
+| GET | `/api/gantt/deleted-plans` | 计划级回收站：可见范围内已删计划（带已删任务数），删计划刷新后仍可恢复 |
+
+**校验规则**（全部在服务层，注解表达不了跨字段 / 跨表约束）：
+
+| 规则 | 违反时 |
+|---|---|
+| 结束日不得早于开始日 | 400 |
+| 里程碑起止必须同一天 | 自动收敛，不报错 |
+| 任务不能依赖自己 | 400 |
+| 两个任务必须属于同一计划 | 400 |
+| 同一对任务只能有一条依赖 | 409 |
+| 新增依赖不得形成环（迭代式 DFS 从 to 走回 from） | 400「会形成循环依赖」 |
+| 父任务必须存在、同计划、且本身是顶层 | 400 |
+| 有子任务的任务默认不能删除 / 不能再认父 | 409（删除可传 `cascade=true` 放行） |
+
+> 为什么用迭代 DFS 而不是递归：任务链长度取决于用户数据，递归深度不可控，栈溢出属于不可恢复的故障。
+
+**更新语义：PUT = 提交即覆盖**。编辑弹窗每次都提交完整表单，因此「可清空」的字段
+（任务的父任务 / 说明 / 负责人 / 颜色，计划的描述）传 `null` 就写 `NULL`。
+早期这里写的是「null = 不更新」，结果是「清空负责人」「把子任务从分组里拿出来」
+静默失败：接口 200、界面提示「已保存」、回读还是旧值——这类不一致最难排查，
+因为它既没有报错也没有日志。服务端维护的 `sort_num` 仍保持「null 不更新」。
+
+**分组任务的派生字段不在弹窗里改**：时间区间 / 状态 / 进度由子任务汇总，
+弹窗内这三项直接禁用并标注「由子任务汇总」，避免用户改完再困惑为什么没生效。
+
+### 前端实现
+
+| 关注点 | 做法 |
+|---|---|
+| 布局 | **单滚动容器 + 左侧列 `position: sticky; left: 0`**。不用「左右两个容器 + scroll 事件互相同步」——那要处理惯性滚动、滚动条高度差、程序设 `scrollLeft` 的回环，是这类组件最常见的抖动来源 |
+| 时间轴 | 日 / 周 / 月三档缩放（30 / 11 / 4.4 px 每天），范围 = 计划区间 ∪ 所有任务区间，前后各留 2 天；周视图对齐到周一、月视图对齐到月初 |
+| 任务条 | 普通任务 = 底色 + 进度填充；分组任务 = 矮条 + 两端折角；里程碑 = 旋转 45° 的方块钉在开始日 |
+| 依赖箭头 | SVG 覆盖在时间轴区域，`pointer-events: none` 不挡点击。按依赖类型挂边：FS 右端→左端，SS 左端→左端，FF 右端→右端，SF 左端→右端；后置任务在前置左侧时走 S 形绕行 |
+| 今日标记 | 红色竖线 + 表头当日红底 |
+| 移动端 | **不缩放桌面图**：390px 下月视图只有 4px/天，条子会叠成色带。改为卡片列表，条子按「占整体跨度的比例」画，仍能看出先后与并行；前置任务以文字列出替代箭头 |
+| 缓存 | 无：缩放级别是纯视图偏好不落库不落 localStorage，每次进入默认周视图；撤销横条为内存态，恢复一律走数据库软删记录（回收站） |
+
+文件：
+
+| 层 | 路径 |
+|---|---|
+| 实体 | `repository/entity/GanttPlan.java`、`GanttTask.java`、`GanttDependency.java` |
+| Mapper | `repository/mapper/GanttMapper.java` + `resources/mapper/GanttMapper.xml` |
+| Service | `service/GanttService.java`、`service/impl/GanttServiceImpl.java`；数据范围 `service/DataScopeService.java` |
+| Controller | `controller/GanttController.java` |
+| DTO / VO | `model/dto/GanttPlanRequest.java`、`GanttTaskRequest.java`、`GanttDependencyRequest.java`；`model/vo/GanttPlanVO.java`、`GanttTaskVO.java`、`GanttDependencyVO.java`、`GanttPlanDetailVO.java` |
+| 建表 | `resources/db/schema-gantt.sql` |
+| 前端 | `views/gantt/GanttView.vue` + `components/GanttChart.vue`、`GanttMobileList.vue`、`GanttTaskDialog.vue`、`GanttPlanDialog.vue`、`utils/date.ts`；接口 `api/gantt.ts`；路由 `/gantt` |
+
+### 实测（2026-11-05）
+
+| 检查 | 结果 |
+|---|---|
+| 接口全流程 22 项（建计划 / 任务 / 里程碑 / 依赖、重复依赖、成环、自依赖、跨层级依赖、父子汇总、删除保护、日期校验、统计、级联删除） | 全部通过 |
+| 数据权限 24 项（超管看全部；普通用户列表隔离；猜 id 读 / 改 / 删他人计划与任务、往他人计划建任务、用他人 taskId 建依赖、删他人依赖，均 403） | 全部通过 |
+| 归属标记 8 项（`owned` 服务端判定；超管看他人计划标出创建人，看自己的不标） | 全部通过 |
+| 编辑保存 16 项（改名 / 日期 / 状态 / 进度 / 优先级、清空负责人 / 说明 / 颜色、取消与重挂父任务、计划的说明与状态） | 全部通过 |
+| 页面编辑 | 改名 + 清空负责人保存后重开仍生效、进度拖到 80% 落库；分组任务的日期 / 状态 / 进度禁用并标「由子任务汇总」；取消分组后子任务升为顶层行 |
+| 删除任务 10 项（普通任务、带依赖任务、分组默认 409、`cascade=true` 连子任务一起删、子任务依赖一并清理、删不存在的任务 404） | 全部通过 |
+| 页面删除 | 编辑弹窗左下「删除任务」→ 二次确认 → 行消失且统计归零；分组任务确认文案报出「一并删除 2 个子任务」，确认后父与子全部消失；新建任务弹窗无删除按钮 |
+| 依赖软删 13 项（删依赖后记录仍在且 `del_flag=1`、详情不再返回、同一对任务可删了再建、重复的有效依赖仍 409、重复删 404、删任务 / 删计划连带软删且一条未少） | 全部通过 |
+| 页面软删 | 删除中间任务后两条依赖箭头同时消失、无悬空线；重新建依赖能正常画出 |
+| 恢复 14 项（单任务恢复含依赖、删分组后恢复任意成员带回全家、依赖恢复冲突跳过、删计划后恢复计划 + 任务 + 依赖、计划已删时恢复任务 409、重复恢复 404） | 全部通过 |
+| 三层 15 项（三层创建、第四层 400、环检测 400、二级与顶层递归汇总、叶子延期传导、状态归纳、级联删除 3 条、回收站后代计数、恢复分组带回孙级、计划回收站列出/计数/恢复/清空） | 全部通过 |
+| 页面 6 项（三层缩进 0/14/28、二级分组折叠整棵子树、今日线 0.45 + 「今天」标签、回收站按钮常驻、计划页签空态） | 全部通过 |
+| 页面交互 9 项（日视图自动滚到今日、悬浮提示字段齐全、悬停高亮 2 条箭头淡出 1 条、拖条右移 3 天落库且不弹窗、拉右缘延长、点击仍开弹窗、折叠少 2 行、删除后撤销横条、撤销后任务回来） | 全部通过 |
+| 页面删计划 → 撤销 | 横条提示计划与任务数，撤销后计划回到列表并自动选中、5 行任务齐全 |
+| 回收站 7 项（列出已删任务、分组标注已删子任务数、删除时间、恢复分组带回 3 条、恢复后列表清空、依赖随家族恢复） | 全部通过 |
+| 页面：表格无灰底 / 撤销横条内存态（刷新后消失，恢复走回收站）/ 回收站弹窗列表与恢复 / 删除按钮浅红胶囊（#fef2f2 + 8px 圆角 + 图标） | 全部通过 |
+| 父任务汇总 | 两个子任务进度 100 / 50 → 父任务 75；区间取子任务最小~最大 |
+| 里程碑 | 传入 `11-20 ~ 11-25` 落库为 `11-20 ~ 11-20`，`durationDays = 1` |
+| 页面 | 12 行任务、11 个任务条 + 1 个菱形、8 条依赖箭头全部渲染；横向滚动时左侧列不动 |
+| 缩放 | 日 / 周 / 月切换正常（滚动宽度 1796 / 657 / 1164） |
+| 编辑 | 点击任务条打开弹窗，名称回填正确；新建任务保存后立即出现在图上并刷新统计 |
+| 移动端 390px | 自动切卡片视图，无横向溢出 |
