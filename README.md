@@ -77,11 +77,12 @@ src/main/resources/
 | 3 | `db/init-im-menu.sql` | 角色、菜单树、授权初始数据（会先清空 `t_menu`） | 必需 |
 | 4 | `db/schema-operation-log.sql` | 系统操作日志表 + 「系统日志」菜单（m21）及其超管授权 | 需要日志功能时 |
 | 5 | `db/schema-tools-menu.sql` | 「工具箱」菜单（m22）及其授权——**纯前端页面，不建表、不加接口** | 需要工具箱时 |
-| 6 | `db/migrate_knowledge_index.sql` | 知识库全文索引 `ft_knowledge_search` | 可选（关闭全文检索则不需要） |
-| 7 | `db/migrate_id_to_varchar32.sql` | 老库升级：`bigint` 主键转字符串并 `LPAD` 补零 | 仅从旧版本升级时 |
+| 6 | `db/schema-agent.sql` | 智能体两张表（会话 / 消息）+ 字典种子 `agent_config` + 菜单（m23） | 需要智能体时 |
+| 7 | `db/migrate_knowledge_index.sql` | 知识库全文索引 `ft_knowledge_search` | 可选（关闭全文检索则不需要） |
+| 8 | `db/migrate_id_to_varchar32.sql` | 老库升级：`bigint` 主键转字符串并 `LPAD` 补零 | 仅从旧版本升级时 |
 
 ```bash
-for f in schema.sql schema-im-menu.sql init-im-menu.sql schema-operation-log.sql schema-tools-menu.sql; do
+for f in schema.sql schema-im-menu.sql init-im-menu.sql schema-operation-log.sql schema-tools-menu.sql schema-agent.sql; do
   mysql --default-character-set=utf8mb4 -uroot -p erupt-example < "src/main/resources/db/$f"
 done
 ```
@@ -165,6 +166,7 @@ curl -X POST http://localhost:8080/api/users \
 | 即时通信 | `/api/chat` | 8 | `ChatController` | 放行 | 会话、消息、未读、可聊对象 |
 | 聊天附件 | `/api/chat/attachments` | 2 | `ChatAttachmentController` | 放行 | 独立存储，不复用 `t_attachment` |
 | 系统日志 | `/api/logs` | 1 | `OperationLogController` | `logs` | 只读审计查询，无写接口 |
+| 智能体 | `/api/agent` | 4 | `AgentController` | `agent` | GLM 多轮对话；会话列表 / 消息 / 删除；配置在数据字典 |
 
 > 「放行」指不参与菜单授权：`AuthInterceptor` 的匿名白名单只有 3 个（登录 / 登录前置 / 验证码），
 > 其余放行都是 `MenuAccessInterceptor` 里的路径规则，见「菜单与授权模块 › 双层防线」。
@@ -1050,9 +1052,10 @@ IllegalStateException: 聊天附件目录 /app/uploads/chat 位于文件管理�
 |---|---|---|
 | `db/schema-operation-log.sql` | `m21` 系统日志（`permission=logs`，挂在系统管理下） | 仅超级管理员；普通用户访问 `/api/logs` 会 403，需在角色管理里手工分配 |
 | `db/schema-tools-menu.sql` | `m22` 工具箱（`permission=tools`，顶级菜单 `/tools`） | 超级管理员 + 普通用户（通用工具，无敏感数据） |
+| `db/schema-agent.sql` | `m23` 智能体（`permission=agent`，顶级菜单 `/agent`） | 超级管理员 + 普通用户（按需在角色管理里收回，避免全员消耗 API 额度） |
 
-验证效果（实测）：超级管理员可见全部菜单；按初始脚本，普通用户默认 5 个节点
-（概览、知识库、即时通信、工具箱 + 对应父目录），可用「角色管理」按需追加。
+验证效果（实测）：超级管理员可见全部菜单；按初始脚本，普通用户默认 6 个节点
+（概览、知识库、即时通信、工具箱、智能体 + 对应父目录），可用「角色管理」按需追加。
 普通用户访问 `/api/knowledge` 放行，访问 `/api/databases` 或 `/api/menu/tree` 返回 403（均不在其授权内）。
 
 ### 文件清单
@@ -1338,6 +1341,167 @@ curl 'http://localhost:8080/api/logs?result=0&startTime=2026-11-04%2016:00:00&en
 实测（2026-11-05）：七个工具全部通过——坏 JSON 报「第 1 行第 3 列附近」、YAML 双向互转、
 TS 生成含嵌套 `author: Author`、UUID 10 条均为合法 v4、时间戳秒级往返、Base64 中文往返一致、
 URL 解码还原中文；移动端 390px 无横向溢出、导航转为横向滚动条。
+
+
+## 智能体模块（t_agent_conversation + t_agent_message）
+
+对接智谱开放平台（BigModel）的 GLM-5.3 / GLM-5.3-Flash，走 **OpenAI Chat Completion 协议**：
+
+```
+POST https://open.bigmodel.cn/api/paas/v4/chat/completions
+Authorization: Bearer <API Key>
+{ "model": "glm-5.3", "messages": [ {role, content} … ], "stream": false }
+```
+
+### 配置放在数据字典里
+
+| 位置 | 字典类型 | 配置项（`label` = 项名，`value` = 值） | 默认值 |
+|---|---|---|---|
+| 系统管理 › 数据字典 | `agent_config` | `API Key` | 空——**必须自己填**，未填时对话会直接提示去哪里配 |
+| | | `chat_url` | `https://open.bigmodel.cn/api/paas/v4/chat/completions` |
+| | | `default_model` | `glm-5.3` |
+| | | `system_prompt` | 「你是 ERUP 管理系统内置助手…」，清空则不发 system 消息 |
+
+三个设计点：
+
+- **实时读取**：每轮对话都查一次字典（走 `idx_dict_type_sort_num` 索引，成本可忽略），改完即生效，不用重启；
+- **不写死 Key**：代码里没有任何 API Key 常量，也没有从 `application.yml` 读——运营改配置不需要碰代码和发布流程；
+- **注意暴露面**：字典的三个读接口对**所有登录用户**放行（各业务页都要用它把存储值翻成展示名），
+  所以 `agent_config` 里的 API Key 对任何登录用户都是可读的。这不是本模块引入的问题，
+  但把密钥放进字典会放大它——若要收紧，可改成只给超管授权并加一个「仅超管可读的类型白名单」，
+  或在 Key 旁标注「仅本系统内部使用，泄露即换」。
+
+### 接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/agent/chat` | 发一条消息；`conversationId` 不传 = 新建会话；可带 `attachmentIds` |
+| GET | `/api/agent/conversations` | 当前用户的会话列表（最近对话在前，最多 100 条） |
+| GET | `/api/agent/conversations/{id}/messages` | 某会话全部消息，时间正序（含每条消息的附件元信息） |
+| DELETE | `/api/agent/conversations/{id}` | 软删除会话 |
+
+```bash
+curl -X POST http://localhost:8080/api/agent/chat \
+  -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' \
+  -d '{"content":"用一句话解释什么是数据库索引"}'
+```
+
+```json
+{
+  "code": 200, "message": "操作成功",
+  "data": {
+    "conversationId": "9f2c…", "title": "用一句话解释什么是数据库索引",
+    "userMessage": { "id": "…", "role": "user", "content": "用一句话解释什么是数据库索引",
+                     "attachments": [] },
+    "reply": { "id": "…", "role": "assistant", "content": "…Markdown…",
+               "reasoning": "…思考过程（可空）…", "model": "glm-5.3",
+               "promptTokens": 96, "completionTokens": 210, "costMs": 8342 }
+  }, "timestamp": 1793859315077
+}
+```
+
+> `userMessage` 是落库后的用户消息：前端插入的乐观气泡要用它替换，
+> 因为「附件是否被解析」（`attachments[].parsed`）只有服务端知道。
+
+### 多轮对话怎么实现
+
+API 是无状态的，「上下文」必须每轮重新带上。本项目的做法：
+
+1. `user` 消息先落库（`t_agent_message`）；
+2. 从消息表取该会话**最近 20 条**（`MAX_CONTEXT_MESSAGES`），反转成正序；
+3. 若字典配了 `system_prompt`，拼在 messages 首位；
+4. 整包发给上游，`assistant` 回复落库并刷新会话 `update_time`（列表按它倒序）。
+
+前端**不回传历史**——历史由后端从库里取，避免前端伪造 `assistant` 角色注入上下文，
+也保证「页面刷新后上下文还在」。
+
+### 附件怎么处理
+
+**先说边界：GLM-5.3 官方文档明确「目前仅支持处理文本模态信息」，不能把图片当视觉输入。**
+硬塞 `image_url` 内容块只会让请求失败，所以这里不做「假装能看图」的事：
+
+| 附件类型 | 处理方式 |
+|---|---|
+| 文本类（`text/*`、json / xml / yaml / 代码 / csv / md …，按 MIME + 扩展名双判定） | 后端读正文拼进本轮 user 消息，包在 `===== 附件《name》开始/结束 =====` 之间；单文件 ≤ 32KB、单轮总计 ≤ 96KB，超出截断并注明 |
+| 图片 / PDF / Office / 压缩包等 | 只存档：消息里可见、可点开预览，但正文不进上下文；给模型追加一句「用户还附带了 xxx，你无法读取其内容，不要臆测」，避免它顺着文件名编造 |
+
+上传复用**现有**附件接口（`POST /api/attachments/upload`，未做任何改动），前端拿到 `id` 后随消息传
+`attachmentIds`；文件名 / 类型 / 大小由服务端按 id 查库，不信任前端。附件正文**不落库**（否则历史回显与
+上下文都会重复膨胀），消息表只存元信息 JSON；多轮组装时历史轮只标注「本轮附带附件：a、b」。
+界面上「未解析」的小徽标就是 `parsed=false` 的可视化——它表示模型没看到内容，不是上传失败。
+
+### 错误码怎么翻译
+
+上游是「HTTP 状态码 + 业务码」两层，直接抛给使用者没有意义，统一翻译到「该做什么」的粒度：
+
+| 上游信号 | 本系统的提示 |
+|---|---|
+| HTTP 401 / 业务码 1000、1001、1003 | 智谱 API 认证失败：去数据字典检查 API Key |
+| 业务码 1211 | 模型不存在：检查 `default_model` 取值 |
+| 业务码 1261 | 对话过长：新建会话或删旧会话 |
+| 业务码 1301 | 内容被平台安全审核拦截 |
+| HTTP 429（含 1113 欠费、1302 限流、1308/1310 额度） | 触发限流或额度限制：稍后重试 + 查余额 |
+| HTTP 5xx / 1200 / 1230 / 1234 | 上游暂时不可用：稍后重试 |
+| 网络层异常 / 读超时 | 连接智谱平台失败或超时 |
+
+**上游 401 被故意映射成 HTTP 500 返回**：前端的全局 401 处理会清 token 并跳登录页，
+若把上游认证失败当成 401 抛出，用户会被莫名登出。
+
+另有两处兼容：`<think>…</think>` 混在正文里时自动拆到 `reasoning` 字段；
+响应按 String 接收再用 Jackson 2 解析（Boot 4 的 HTTP 转换器是 Jackson 3，
+直接 `body(JsonNode.class)` 会因两套 Jackson 的 `JsonNode` 不通用而失败）。
+超时设置：连接 5s、读 180s——GLM-5.3 的思考模式始终开启，复杂问题一轮几十秒是常态。
+
+### 表结构
+
+| 表 | 作用 | 关键字段 |
+|---|---|---|
+| `t_agent_conversation` | 一行 = 一次多轮对话 | `user_id`（归属，会话仅本人可见）、`title`（首条消息前 50 字）、`model`、`del_flag` |
+| `t_agent_message` | 一行 = 一条 user / assistant 消息 | `conversation_id`、`role`、`content`（MEDIUMTEXT，存 Markdown 原文）、`attachments`（TEXT，附件元信息 JSON）、`reasoning`、`model`、`prompt_tokens` / `completion_tokens` / `cost_ms` |
+
+`attachments` 只存 `[{id,name,contentType,size,parsed}]` 这样的引用，文件本体仍归附件模块的
+`t_attachment` 管理——同一份文件在文件管理页也能看到，不做第二份存储。
+
+消息表**不设** `del_flag`：会话软删除后整段不可达，消息跟随会话生命周期；
+正文存 Markdown 原文不做 HTML 转换——渲染形态交给展示层。
+
+两张表的 `create_time` / `update_time` 用 **`DATETIME(3)` 毫秒精度**：一轮对话里 user 与 assistant
+两条消息常常在同一秒内落库，秒级精度会让 `ORDER BY create_time` 的顺序随机——
+上下文顺序错了，模型看到的就是「先回答后提问」。毫秒精度 + `NOW(3)` 写入解决这个问题。
+
+### 前端
+
+页面在「智能体」（`views/agent/AgentView.vue`）：
+
+- 左侧会话列表（新建 / 切换 / 删除，最近对话在前），**会话栏顶部右侧的「收起」按钮可折叠**，收起后入口平移到对话区头部，不会出现「关了打不开」（折叠状态记忆在 `localStorage`）；移动端会话列表收进顶部下拉；
+- 输入区是一个 3 行起的大输入框（`textarea`），底部工具条：左边附件按钮，右边模型选择 + **圆形上箭头发送按钮**（空输入 / 上传中自动禁用）；
+- 附件：选图后立刻出本地缩略图（`objectURL`），文本类附件上传完成后随消息发送；历史消息里的图片走预览接口取 `Blob` 再转 `objectURL`（`<img src>` 无法带 `Authorization` 头）；
+- 助手回复用 `marked` 渲染 Markdown、`DOMPurify` 消毒后 `v-html`——模型输出属于不可信输入，直接渲染等于把 XSS 注入权交给上游；
+- 思考过程（`reasoning`）折叠展示；每条回复下方显示「模型 · tokens · 耗时」；
+- 等待时显示「正在思考… Ns」计时（非流式，长回答需要耐心）；出错显示红色气泡，会话与已输入内容不丢，可直接重发；
+- Enter 发送 / Shift + Enter 换行，输入法组合期间回车不会误发（`isComposing` 判断）。
+
+### 文件清单
+
+| 层级 | 文件路径 |
+|---|---|
+| 视图层 | `controller/AgentController.java` |
+| 服务层 | `service/AgentService.java`、`service/impl/AgentServiceImpl.java`（上游调用 + 错误翻译 + 上下文组装） |
+| Mapper | `repository/mapper/AgentMapper.java`、`resources/mapper/AgentMapper.xml` |
+| 实体 / DTO / VO | `repository/entity/AgentConversation.java`、`AgentMessage.java`、`model/dto/AgentChatRequest.java`、`model/vo/AgentChatVO.java`、`AgentConversationVO.java`、`AgentMessageVO.java`、`AgentAttachmentVO.java` |
+| 建表与种子 | `resources/db/schema-agent.sql`（两张表 + `agent_config` 字典 + 菜单 `m23`） |
+| 附件 | 复用 `AttachmentService.getResource(id)` 只读取正文，**不改任何附件接口** |
+| 前端 | `views/agent/AgentView.vue`、`api/agent.ts`；路由 `/agent` |
+| 新增依赖 | 后端无（用 Spring 自带的 `RestClient`）；前端 `dompurify`（Markdown 消毒） |
+
+实测（2026-11-05）：菜单可见、四个接口就位；未配 Key 时返回
+「尚未配置 API Key：请到「系统管理 › 数据字典」编辑 agent_config 下的「API Key」」，
+配假 Key 时上游 401 被翻译为认证失败提示（HTTP 500，未触发登出），
+非法模型名被白名单拦下（400）；多轮上下文实测第 1/2/3 轮分别收到 2/4/6 条消息，角色序列正确；
+附件实测：文本附件正文被完整读入并包在分隔标记里、图片附件收到「无法读取其内容」的说明、
+消息表 `attachments` 元信息与 `parsed` 标记正确、刷新后历史图片仍能显示；
+浏览器实测会话栏折叠、大输入框、圆形发送按钮、模型在发送按钮左侧、上传进度与「未解析」徽标均正常，
+移动端 390px 无横向溢出。**真实对话需在数据字典里填入你的 API Key**。
 
 
 ## 约定说明
