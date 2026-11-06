@@ -59,6 +59,49 @@ public interface GanttMapper {
     /** 统计同层最大排序号，新增任务时追加到末尾 */
     int selectMaxSortNum(@Param("planId") String planId, @Param("parentId") String parentId);
 
+    /**
+     * 任务到期提醒扫描：找出需要发提醒的任务行。
+     *
+     * <p>提醒范围：未完成（status != 'done'）且 end_date 在今天 + dueInDays 天内
+     * （含已逾期）；去重在 SQL 层完成——同一任务 repeatDays 天内发过 type=task
+     * 通知就不再返回（NOT EXISTS + (biz_id, type) 索引），任务完成自动停发。</p>
+     *
+     * <p>接收人是计划创建者（p.create_by）：任务的 assignee 是自由文本（不保证
+     * 是用户 id），计划创建者是唯一可靠的归属。</p>
+     *
+     * @param dueInDays  提醒提前量：end_date 距今天不超过该天数的未完成任务
+     * @param repeatDays 同一任务的重复提醒间隔
+     */
+    List<TaskReminderRow> selectTasksDueReminder(@Param("dueInDays") int dueInDays,
+                                                 @Param("repeatDays") int repeatDays);
+
+    /** 提醒扫描的行：任务 + 计划名 + 接收人，一条 SQL 拼齐避免逐任务回查 */
+    class TaskReminderRow {
+        private String id;
+        private String taskName;
+        private java.time.LocalDate endDate;
+        private String status;
+        private String assignee;
+        private String planName;
+        /** 提醒接收人 = 计划创建者 */
+        private String ownerId;
+
+        public String getId() { return id; }
+        public void setId(String id) { this.id = id; }
+        public String getTaskName() { return taskName; }
+        public void setTaskName(String taskName) { this.taskName = taskName; }
+        public java.time.LocalDate getEndDate() { return endDate; }
+        public void setEndDate(java.time.LocalDate endDate) { this.endDate = endDate; }
+        public String getStatus() { return status; }
+        public void setStatus(String status) { this.status = status; }
+        public String getAssignee() { return assignee; }
+        public void setAssignee(String assignee) { this.assignee = assignee; }
+        public String getPlanName() { return planName; }
+        public void setPlanName(String planName) { this.planName = planName; }
+        public String getOwnerId() { return ownerId; }
+        public void setOwnerId(String ownerId) { this.ownerId = ownerId; }
+    }
+
     /* ---------- 依赖 ---------- */
 
     int insertDependency(GanttDependency dependency);

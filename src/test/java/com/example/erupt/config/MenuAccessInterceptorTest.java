@@ -138,6 +138,19 @@ class MenuAccessInterceptorTest {
     }
 
     @Test
+    @DisplayName("全局搜索精确放行，同名前缀的其它路径仍要鉴权")
+    void searchIsExactNotPrefix() {
+        MockHttpServletResponse search = new MockHttpServletResponse();
+        assertThat(interceptor.preHandle(request("GET", "/api/search"), search, new Object())).isTrue();
+        verify(menuService, never()).hasPermission(eq("u-1"), eq("search"));
+
+        when(menuService.hasPermission("u-1", "search-admin")).thenReturn(false);
+        MockHttpServletResponse other = new MockHttpServletResponse();
+        assertThat(interceptor.preHandle(request("GET", "/api/search-admin"), other, new Object())).isFalse();
+        assertThat(other.getStatus()).isEqualTo(403);
+    }
+
+    @Test
     @DisplayName("未登录请求本拦截器不拦截，由 AuthInterceptor 负责 401")
     void notLoggedIn_passThrough() {
         AuthContext.clear();

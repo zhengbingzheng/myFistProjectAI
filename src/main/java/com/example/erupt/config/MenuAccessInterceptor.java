@@ -42,7 +42,13 @@ import java.util.regex.Pattern;
 @Component
 public class MenuAccessInterceptor implements HandlerInterceptor {
 
-    /** 不参与菜单鉴权的路径前缀 */
+    /**
+     * 不参与菜单鉴权的路径前缀。
+     *
+     * <p>{@code /api/search} 精确放行：全局搜索在任何页面都能触发，不能按某一个菜单拦死。
+     * 各模块结果在 SearchServiceImpl 里按调用方真实权限裁剪。这里不能用前缀，
+     * 否则 {@code /api/search} 会把将来的 {@code /api/search-admin} 一起放掉。</p>
+     */
     private static final Set<String> SKIP_PREFIXES = Set.of(
             "/api/auth/",
             "/api/chat/",
@@ -61,7 +67,8 @@ public class MenuAccessInterceptor implements HandlerInterceptor {
     private static final Set<String> SKIP_EXACT = Set.of(
             "/api/menu/mine",
             "/api/users/me",
-            "/api/users/me/password"
+            "/api/users/me/password",
+            "/api/search"
     );
 
     /**

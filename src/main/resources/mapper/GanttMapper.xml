@@ -392,4 +392,40 @@
         WHERE `id` = #{id} AND `del_flag` = '1'
     </update>
 
+    <!--
+      任务到期提醒扫描（第 3 步）。
+      - 未完成（status != 'done'）且 end_date 在今天 + dueInDays 天内（含已逾期）；
+      - 去重：同一任务 repeatDays 天内发过 type=task 通知就不再返回——
+        NOT EXISTS 走 t_notification 的 (biz_id, type) 索引；
+      - 接收人取计划创建者：assignee 是自由文本，不保证对得上用户表；
+      - LIMIT 200：提醒是批量后台行为，单轮上限防极端数据拖垮任务。
+    -->
+    <resultMap id="TaskReminderResultMap" type="com.example.erupt.repository.mapper.GanttMapper$TaskReminderRow">
+        <result column="id" property="id" jdbcType="VARCHAR"/>
+        <result column="task_name" property="taskName" jdbcType="VARCHAR"/>
+        <result column="end_date" property="endDate" jdbcType="DATE"/>
+        <result column="status" property="status" jdbcType="VARCHAR"/>
+        <result column="assignee" property="assignee" jdbcType="VARCHAR"/>
+        <result column="plan_name" property="planName" jdbcType="VARCHAR"/>
+        <result column="owner_id" property="ownerId" jdbcType="VARCHAR"/>
+    </resultMap>
+
+    <select id="selectTasksDueReminder" resultMap="TaskReminderResultMap">
+        SELECT t.`id`, t.`task_name`, t.`end_date`, t.`status`, t.`assignee`,
+               p.`plan_name` AS plan_name, p.`create_by` AS owner_id
+        FROM `t_gantt_task` t
+        JOIN `t_gantt_plan` p ON p.`id` = t.`plan_id` AND p.`del_flag` = '0'
+        WHERE t.`del_flag` = '0'
+          AND t.`status` != 'done'
+          AND t.`end_date` &lt;= DATE_ADD(CURDATE(), INTERVAL #{dueInDays} DAY)
+          AND NOT EXISTS (
+              SELECT 1 FROM `t_notification` n
+              WHERE n.`biz_id` = t.`id` AND n.`type` = 'task'
+                AND n.`del_flag` = '0'
+                AND n.`create_time` &gt;= DATE_SUB(NOW(), INTERVAL #{repeatDays} DAY)
+          )
+        ORDER BY t.`end_date` ASC
+        LIMIT 200
+    </select>
+
 </mapper>

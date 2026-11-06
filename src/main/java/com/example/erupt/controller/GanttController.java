@@ -1,6 +1,8 @@
 package com.example.erupt.controller;
 
+import com.example.erupt.common.BusinessException;
 import com.example.erupt.common.Result;
+import com.example.erupt.common.ResultCode;
 import com.example.erupt.model.dto.GanttDependencyRequest;
 import com.example.erupt.model.dto.GanttPlanRequest;
 import com.example.erupt.model.dto.GanttTaskRequest;
@@ -9,7 +11,9 @@ import com.example.erupt.model.vo.GanttDeletedTaskVO;
 import com.example.erupt.model.vo.GanttPlanDetailVO;
 import com.example.erupt.model.vo.GanttPlanVO;
 import com.example.erupt.model.vo.GanttRestoreVO;
+import com.example.erupt.service.DataScopeService;
 import com.example.erupt.service.GanttService;
+import com.example.erupt.service.TaskReminderService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -39,9 +43,14 @@ import java.util.List;
 public class GanttController {
 
     private final GanttService ganttService;
+    private final TaskReminderService taskReminderService;
+    private final DataScopeService dataScope;
 
-    public GanttController(GanttService ganttService) {
+    public GanttController(GanttService ganttService, TaskReminderService taskReminderService,
+                           DataScopeService dataScope) {
         this.ganttService = ganttService;
+        this.taskReminderService = taskReminderService;
+        this.dataScope = dataScope;
     }
 
     /* ---------- 计划 ---------- */
@@ -134,5 +143,20 @@ public class GanttController {
     @PostMapping("/dependencies/{id}/restore")
     public ResponseEntity<Result<GanttRestoreVO>> restoreDependency(@PathVariable String id) {
         return ResponseEntity.ok(ganttService.restoreDependency(id));
+    }
+
+    /**
+     * 手动触发一轮任务到期提醒（仅超管）。
+     *
+     * <p>定时任务每天上午 9 点自动跑；这个入口用于验证与补跑——
+     * 「提醒没发出来？」不用等到第二天上午，超管点一下立刻见分晓。
+     * 限超管：普通用户能触发就等于能反复给自己刷通知。</p>
+     */
+    @PostMapping("/reminders/run")
+    public ResponseEntity<Result<Integer>> runReminders() {
+        if (dataScope.dataScopeOwnerId() != null) {
+            throw new BusinessException(ResultCode.FORBIDDEN, "仅超级管理员可手动触发提醒扫描");
+        }
+        return ResponseEntity.ok(Result.success(taskReminderService.runOnce()));
     }
 }

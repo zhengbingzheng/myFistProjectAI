@@ -38,35 +38,20 @@ public class ChatHandshakeInterceptor implements HandshakeInterceptor {
                                    ServerHttpResponse response,
                                    WebSocketHandler wsHandler,
                                    Map<String, Object> attributes) {
-        // 优先用一次性 ticket（避免长期 token 进 URL 日志）；无 ticket 再退回 token，兼容旧前端
+        // 只接受一次性 ticket。长期 token 放在查询串会进访问日志，登出前都能重放。
         String ticket = extractParam(request.getURI(), "ticket");
-        if (ticket != null) {
-            Optional<String> userId = tokenService.consumeWsTicket(ticket);
-            if (userId.isEmpty()) {
-                log.warn("WebSocket 握手 ticket 无效或已过期，来源={}", request.getRemoteAddress());
-                response.setStatusCode(org.springframework.http.HttpStatus.UNAUTHORIZED);
-                return false;
-            }
-            attributes.put(ChatWebSocketHandler.ATTR_USER_ID, userId.get());
-            return true;
-        }
-
-        String token = extractParam(request.getURI(), "token");
-        if (token == null) {
-            token = extractParam(request.getURI(), "access_token");
-        }
-        if (token == null) {
-            log.warn("WebSocket 握手缺少 token/ticket，来源={}", request.getRemoteAddress());
+        if (ticket == null) {
+            log.warn("WebSocket 握手缺少 ticket，来源={}", request.getRemoteAddress());
             response.setStatusCode(org.springframework.http.HttpStatus.UNAUTHORIZED);
             return false;
         }
-        Optional<TokenService.TokenIdentity> identity = tokenService.verify(token);
-        if (identity.isEmpty()) {
-            log.warn("WebSocket 握手 token 无效或已过期");
+        Optional<String> userId = tokenService.consumeWsTicket(ticket);
+        if (userId.isEmpty()) {
+            log.warn("WebSocket 握手 ticket 无效或已过期，来源={}", request.getRemoteAddress());
             response.setStatusCode(org.springframework.http.HttpStatus.UNAUTHORIZED);
             return false;
         }
-        attributes.put(ChatWebSocketHandler.ATTR_USER_ID, identity.get().userId());
+        attributes.put(ChatWebSocketHandler.ATTR_USER_ID, userId.get());
         return true;
     }
 
@@ -79,7 +64,7 @@ public class ChatHandshakeInterceptor implements HandshakeInterceptor {
     }
 
     /**
-     * 从查询串里按名称取值（token / access_token / ticket 通用）。
+     * 从查询串里按名称取值。握手只认 ticket。
      */
     private static String extractParam(URI uri, String paramName) {
         String query = uri == null ? null : uri.getQuery();

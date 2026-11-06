@@ -12,7 +12,6 @@ import com.example.erupt.service.AuthService;
 import com.example.erupt.service.TokenService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
-import jakarta.validation.constraints.NotBlank;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -122,17 +121,6 @@ public class AuthController {
     public ResponseEntity<Result<Void>> logout(
             @RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String authorization) {
         authService.logout(extractToken(authorization));
-        return ResponseEntity.ok(Result.success(null, "退出成功"));
-    }
-
-    /**
-     * 前端在没有走标准 header 时，可能会用 {@code ?token=...} 传凭证。
-     * 兼容一下这种非主流方式，避免在异常场景下无法登出。
-     */
-    @PostMapping("/logout-via-param")
-    public ResponseEntity<Result<Void>> logoutViaParam(HttpServletRequest request,
-                                                       @RequestParam("token") @NotBlank String token) {
-        authService.logout(token);
         return ResponseEntity.ok(Result.success(null, "退出成功"));
     }
 

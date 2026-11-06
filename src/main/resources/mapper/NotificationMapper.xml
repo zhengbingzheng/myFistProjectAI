@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  站内通知数据访问。
+
+  条件复用策略与 AttachmentMapper 相同：公共条件抽成 <sql> 片段，列表与计数共用同一份，
+  避免「列表有数据但总数是 0」这类两边条件不一致的难查问题。
+-->
+<mapper namespace="com.example.erupt.repository.mapper.NotificationMapper">
+
+    <resultMap id="BaseResultMap" type="com.example.erupt.repository.entity.Notification">
+        <result column="id" property="id" jdbcType="VARCHAR"/>
+        <result column="user_id" property="userId" jdbcType="VARCHAR"/>
+        <result column="title" property="title" jdbcType="VARCHAR"/>
+        <result column="content" property="content" jdbcType="VARCHAR"/>
+        <result column="type" property="type" jdbcType="VARCHAR"/>
+        <result column="biz_id" property="bizId" jdbcType="VARCHAR"/>
+        <result column="biz_path" property="bizPath" jdbcType="VARCHAR"/>
+        <result column="read_flag" property="readFlag" jdbcType="CHAR"/>
+        <result column="read_time" property="readTime" jdbcType="TIMESTAMP"/>
+        <result column="del_flag" property="delFlag" jdbcType="CHAR"/>
+        <result column="create_time" property="createTime" jdbcType="TIMESTAMP"/>
+        <result column="update_time" property="updateTime" jdbcType="TIMESTAMP"/>
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        id, user_id, title, content, type, biz_id, biz_path, read_flag, read_time, del_flag, create_time, update_time
+    </sql>
+
+    <!-- 列表与计数共用的过滤条件：归属 + 页签，del_flag 常量条件放在片段里（见 AttachmentMapper 同款注释） -->
+    <sql id="Condition_Where">
+        del_flag = '0'
+        AND user_id = #{userId}
+        <if test="type != null and type != ''">
+            AND type = #{type}
+        </if>
+        <if test="readFlag != null and readFlag != ''">
+            AND read_flag = #{readFlag}
+        </if>
+    </sql>
+
+    <insert id="insert">
+        INSERT INTO t_notification (id, user_id, title, content, type, biz_id, biz_path,
+                                    read_flag, read_time, del_flag, create_time, update_time)
+        VALUES (#{id}, #{userId}, #{title}, #{content}, #{type}, #{bizId}, #{bizPath},
+                '0', NULL, '0', NOW(3), NOW(3))
+    </insert>
+
+    <!-- 未读排最前，同状态按创建时间倒序；LIMIT/OFFSET 分页与全库约定一致 -->
+    <select id="selectPageByUser" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM t_notification
+        <where>
+            <include refid="Condition_Where"/>
+        </where>
+        ORDER BY read_flag ASC, create_time DESC
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <select id="countByUser" resultType="long">
+        SELECT COUNT(*)
+        FROM t_notification
+        <where>
+            <include refid="Condition_Where"/>
+        </where>
+    </select>
+
+    <!-- 角标计数只需扫未读：走 (user_id, read_flag, create_time) 前缀，O(未读数) 而非 O(总数) -->
+    <select id="countUnread" resultType="long">
+        SELECT COUNT(*)
+        FROM t_notification
+        WHERE user_id = #{userId} AND read_flag = '0' AND del_flag = '0'
+    </select>
+
+    <!-- 带 userId 条件的查询 = 归属校验本身：别人的通知 id 传进来只会查到 null -->
+    <select id="selectByIdAndUser" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM t_notification
+        WHERE id = #{id} AND user_id = #{userId} AND del_flag = '0'
+    </select>
+
+    <update id="markRead">
+        UPDATE t_notification
+        SET read_flag = '1', read_time = NOW(3), update_time = NOW(3)
+        WHERE id = #{id} AND user_id = #{userId} AND del_flag = '0' AND read_flag = '0'
+    </update>
+
+    <update id="markAllRead">
+        UPDATE t_notification
+        SET read_flag = '1', read_time = NOW(3), update_time = NOW(3)
+        WHERE user_id = #{userId} AND read_flag = '0' AND del_flag = '0'
+    </update>
+
+    <update id="logicDelete">
+        UPDATE t_notification
+        SET del_flag = '1', update_time = NOW(3)
+        WHERE id = #{id} AND user_id = #{userId} AND del_flag = '0'
+    </update>
+
+    <!--
+      事件去重：同一业务对象（biz_id + type）在 withinDays 天内是否已发过通知。
+      任务提醒的「3 天内提醒过就不再发」靠它判断；走 (biz_id, type) 索引。
+      不带 userId：去重是按业务对象判断的——任务换了接收人（如计划重建）也不该重复提醒。
+    -->
+    <select id="existsRecent" resultType="boolean">
+        SELECT EXISTS(
+            SELECT 1 FROM t_notification
+            WHERE biz_id = #{bizId} AND type = #{type}
+              AND del_flag = '0'
+              AND create_time &gt;= DATE_SUB(NOW(), INTERVAL #{withinDays} DAY)
+        )
+    </select>
+</mapper>

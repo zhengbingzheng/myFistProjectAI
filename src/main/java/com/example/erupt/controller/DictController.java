@@ -3,6 +3,7 @@ package com.example.erupt.controller;
 import com.example.erupt.common.AuthContext;
 import com.example.erupt.common.PageResult;
 import com.example.erupt.common.Result;
+import com.example.erupt.common.SecretDicts;
 import com.example.erupt.model.dto.DictItemRequest;
 import com.example.erupt.model.dto.DictItemUpdateRequest;
 import com.example.erupt.model.dto.DictTypeRequest;
@@ -10,6 +11,7 @@ import com.example.erupt.model.dto.DictTypeUpdateRequest;
 import com.example.erupt.model.vo.DictItemVO;
 import com.example.erupt.model.vo.DictTypeVO;
 import com.example.erupt.service.DictService;
+import com.example.erupt.service.MenuService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -41,9 +43,11 @@ import java.util.List;
 public class DictController {
 
     private final DictService dictService;
+    private final MenuService menuService;
 
-    public DictController(DictService dictService) {
+    public DictController(DictService dictService, MenuService menuService) {
         this.dictService = dictService;
+        this.menuService = menuService;
     }
 
     /* ---------- 字典类型 ---------- */
@@ -92,7 +96,10 @@ public class DictController {
             @RequestParam(required = false) Integer pageSize) {
         PageResult<DictItemVO> data = dictService.pageItems(
                 dictType, page == null ? 1 : page, pageSize == null ? 10 : pageSize);
-        return ResponseEntity.ok(Result.success(data));
+        List<DictItemVO> visible = visibleItems(dictType, data.items());
+        long hidden = data.items().size() - visible.size();
+        return ResponseEntity.ok(Result.success(
+                PageResult.of(visible, Math.max(0, data.total() - hidden), data.page(), data.pageSize())));
     }
 
     /**
@@ -104,7 +111,7 @@ public class DictController {
      */
     @GetMapping("/{dictType}/items")
     public ResponseEntity<Result<List<DictItemVO>>> enabledItems(@PathVariable String dictType) {
-        return ResponseEntity.ok(Result.success(dictService.listEnabledItems(dictType)));
+        return ResponseEntity.ok(Result.success(visibleItems(dictType, dictService.listEnabledItems(dictType))));
     }
 
     @PostMapping("/items")
@@ -123,5 +130,20 @@ public class DictController {
     public ResponseEntity<Result<Void>> deleteItem(@PathVariable String id) {
         dictService.deleteItem(id, AuthContext.currentUsername());
         return ResponseEntity.ok(Result.success(null, "删除成功"));
+    }
+
+    /**
+     * 共享读接口对所有登录用户开放，字典管理页也走同一条路径。
+     * 有 dict 菜单的人要看到密钥才能编辑；其他人连字段都不返回。
+     */
+    private List<DictItemVO> visibleItems(String dictType, List<DictItemVO> items) {
+        if (!SecretDicts.isProtectedType(dictType)) {
+            return items;
+        }
+        String userId = AuthContext.currentUserId();
+        if (userId != null && menuService.hasPermission(userId, "dict")) {
+            return items;
+        }
+        return SecretDicts.redact(items);
     }
 }

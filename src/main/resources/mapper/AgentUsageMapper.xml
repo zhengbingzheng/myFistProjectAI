@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  智能体用量统计：对 t_agent_message（assistant 行）的聚合查询。
+
+  - 消息无归属列，JOIN 会话表按 create_by 过滤；ownerId 为 null（超管）不加条件；
+  - 已删除会话的消息也计入：token 是真实消耗，「用量」不随会话删除而消失；
+  - SUM 前先 COALESCE：一条记录都没有时返回 0 而不是 null，前端不用判空。
+-->
+<mapper namespace="com.example.erupt.repository.mapper.AgentUsageMapper">
+
+    <!-- 数据范围条件片段：列表/汇总/分组共用同一份 -->
+    <sql id="Scope_Where">
+        m.role = 'assistant'
+        <if test="ownerId != null and ownerId != ''">
+            AND c.create_by = #{ownerId}
+        </if>
+    </sql>
+
+    <select id="selectSummary" resultType="com.example.erupt.model.vo.AgentUsageVO$Summary">
+        SELECT COUNT(DISTINCT m.conversation_id)              AS conversations,
+               COUNT(*)                                       AS messages,
+               COALESCE(SUM(m.prompt_tokens), 0)              AS promptTokens,
+               COALESCE(SUM(m.completion_tokens), 0)          AS completionTokens,
+               COALESCE(SUM(m.prompt_tokens), 0) + COALESCE(SUM(m.completion_tokens), 0) AS totalTokens,
+               COALESCE(SUM(m.cost_ms), 0)                    AS costMs
+        FROM t_agent_message m
+        JOIN t_agent_conversation c ON c.id = m.conversation_id
+        <where>
+            <include refid="Scope_Where"/>
+        </where>
+    </select>
+
+    <select id="selectByModel" resultType="com.example.erupt.model.vo.AgentUsageVO$ModelRow">
+        SELECT m.model                        AS model,
+               COUNT(*)                       AS messages,
+               COALESCE(SUM(m.prompt_tokens), 0)     AS promptTokens,
+               COALESCE(SUM(m.completion_tokens), 0) AS completionTokens,
+               COALESCE(SUM(m.cost_ms), 0)           AS costMs
+        FROM t_agent_message m
+        JOIN t_agent_conversation c ON c.id = m.conversation_id
+        <where>
+            <include refid="Scope_Where"/>
+        </where>
+        GROUP BY m.model
+        ORDER BY promptTokens + completionTokens DESC
+    </select>
+
+    <select id="selectByDay" resultType="com.example.erupt.model.vo.AgentUsageVO$DayRow">
+        SELECT DATE_FORMAT(m.create_time, '%Y-%m-%d') AS day,
+               COUNT(*)                               AS messages,
+               COALESCE(SUM(m.prompt_tokens), 0)      AS promptTokens,
+               COALESCE(SUM(m.completion_tokens), 0)  AS completionTokens
+        FROM t_agent_message m
+        JOIN t_agent_conversation c ON c.id = m.conversation_id
+        <where>
+            <include refid="Scope_Where"/>
+            AND m.create_time &gt;= DATE_SUB(CURDATE(), INTERVAL #{days} DAY)
+        </where>
+        GROUP BY day
+        ORDER BY day ASC
+    </select>
+
+    <select id="selectByUser" resultType="com.example.erupt.model.vo.AgentUsageVO$UserRow">
+        SELECT c.create_by                    AS userId,
+               u.nickname                     AS nickname,
+               u.username                     AS username,
+               COUNT(*)                       AS messages,
+               COALESCE(SUM(m.prompt_tokens), 0)     AS promptTokens,
+               COALESCE(SUM(m.completion_tokens), 0) AS completionTokens,
+               COALESCE(SUM(m.cost_ms), 0)           AS costMs
+        FROM t_agent_message m
+        JOIN t_agent_conversation c ON c.id = m.conversation_id
+        LEFT JOIN t_user u ON u.id = c.create_by
+        <where>
+            m.role = 'assistant'
+            <if test="ownerId != null and ownerId != ''">
+                AND c.create_by = #{ownerId}
+            </if>
+        </where>
+        GROUP BY c.create_by, u.nickname, u.username
+        ORDER BY promptTokens + completionTokens DESC
+    </select>
+</mapper>

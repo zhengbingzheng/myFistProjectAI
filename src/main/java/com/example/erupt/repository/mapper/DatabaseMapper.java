@@ -56,6 +56,7 @@ public interface DatabaseMapper {
     List<Map<String, Object>> selectTableData(@Param("schema") String schema,
                                               @Param("table") String table,
                                               @Param("columnListSql") String columnListSql,
+                                              @Param("orderBySql") String orderBySql,
                                               @Param("offset") long offset,
                                               @Param("limit") int limit);
 }

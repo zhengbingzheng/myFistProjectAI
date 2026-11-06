@@ -96,6 +96,10 @@ app:
     # 鉴权总开关。设为 false 时所有接口放行，仅用于本地联调，切勿在生产开启
     enabled: ${AUTH_ENABLED:true}
 
+  # 智能体上游。chat_url 必须是这里列出的 https 主机，避免字典被改成内网地址后把 API Key 带出去。
+  agent:
+    allowed-hosts: ${AGENT_ALLOWED_HOSTS:open.bigmodel.cn}
+
   knowledge:
     # 知识列表检索模式：
     #   true  = 全文索引 MATCH(...) AGAINST(...)，依赖索引 ft_knowledge_search（见 db/schema.sql），

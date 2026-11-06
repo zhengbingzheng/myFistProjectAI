@@ -15,6 +15,7 @@ import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.core.task.TaskRejectedException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
@@ -170,8 +171,7 @@ public class GlobalExceptionHandler {
     /**
      * 必填的 @RequestParam / @PathVariable 缺失。
      *
-     * <p>不接住会落进兜底变成 500——真实触发点如 {@code POST /api/auth/logout-via-param}
-     * 的必填 {@code token} 参数缺失，调用方拿到"服务内部异常"，且污染 ERROR 告警日志。</p>
+     * <p>不接住会落进兜底变成 500——调用方拿到"服务内部异常"，且污染 ERROR 告警日志。</p>
      */
     @ExceptionHandler(MissingServletRequestParameterException.class)
     public ResponseEntity<Result<Void>> handleMissingParameter(MissingServletRequestParameterException ex) {
@@ -213,6 +213,13 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED)
                 .body(Result.failure(ResultCode.METHOD_NOT_ALLOWED,
                         "该接口不支持 " + ex.getMethod() + " 请求"));
+    }
+
+    @ExceptionHandler(TaskRejectedException.class)
+    public ResponseEntity<Result<Void>> handleTaskRejected(TaskRejectedException ex) {
+        log.warn("异步任务被拒绝：{}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .body(Result.failure(ResultCode.TOO_MANY_REQUESTS, "当前请求较多，请稍后重试"));
     }
 
     @ExceptionHandler(Exception.class)

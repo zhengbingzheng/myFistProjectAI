@@ -1,6 +1,7 @@
 package com.example.erupt.service;
 
 import com.example.erupt.common.AuthContext;
+import com.example.erupt.common.RequestScopeCache;
 import com.example.erupt.common.BusinessException;
 import com.example.erupt.common.ResultCode;
 import com.example.erupt.repository.entity.Role;
@@ -43,12 +44,18 @@ public class DataScopeService {
         if (userId == null) {
             return false;
         }
+        Boolean cached = RequestScopeCache.superAdmin();
+        if (cached != null) {
+            return cached;
+        }
         List<Role> roles = menuMapper.selectRolesByUserId(userId);
         for (Role role : roles) {
             if (SUPER_ADMIN_ROLE.equals(role.getRoleCode())) {
+                RequestScopeCache.rememberSuperAdmin(true);
                 return true;
             }
         }
+        RequestScopeCache.rememberSuperAdmin(false);
         return false;
     }
 

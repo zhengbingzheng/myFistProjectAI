@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  全局搜索：跨模块联合查询。
+
+  统一约定：
+  - 每条 SQL 返回同构行：module（常量）、id、title、snippet_raw（正文前 200 字）、update_time；
+  - LIKE 转义与各模块一致：服务层 LikeEscape + ESCAPE '/'，避免 % _ 被当通配符；
+  - 各模块的可见性规则与它的列表页完全一致——搜索给出的结果，用户跳过去一定能看到；
+  - t_knowledge / t_navigation 没有 del_flag 列（共享数据，物理存在即有效），
+    t_attachment / t_gantt_* 有软删除，必须过滤。
+-->
+<mapper namespace="com.example.erupt.repository.mapper.SearchMapper">
+
+    <select id="searchKnowledge" resultType="map">
+        SELECT 'knowledge' AS module, id, knowledge_name AS title,
+               LEFT(knowledge_content, 200) AS snippet_raw,
+               DATE_FORMAT(update_time, '%Y-%m-%d %H:%i') AS update_time
+        FROM t_knowledge
+        <where>
+            <if test="keyword != null and keyword != ''">
+                (knowledge_name LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/'
+                OR knowledge_content LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/')
+            </if>
+        </where>
+        ORDER BY update_time DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="searchKnowledgeFullText" resultType="map">
+        SELECT 'knowledge' AS module, id, knowledge_name AS title,
+               LEFT(knowledge_content, 200) AS snippet_raw,
+               DATE_FORMAT(update_time, '%Y-%m-%d %H:%i') AS update_time
+        FROM t_knowledge
+        WHERE MATCH(knowledge_name, knowledge_content) AGAINST(#{keyword} IN BOOLEAN MODE)
+        ORDER BY MATCH(knowledge_name, knowledge_content) AGAINST(#{keyword} IN BOOLEAN MODE) DESC,
+                 update_time DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="searchNavigations" resultType="map">
+        SELECT 'navigation' AS module, id, navigation_name AS title,
+               CONCAT_WS(' · ', `desc`, tag) AS snippet_raw,
+               DATE_FORMAT(update_time, '%Y-%m-%d %H:%i') AS update_time
+        FROM t_navigation
+        <where>
+            <if test="keyword != null and keyword != ''">
+                (navigation_name LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/'
+                OR `desc` LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/'
+                OR tag LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/')
+            </if>
+        </where>
+        ORDER BY update_time DESC
+        LIMIT #{limit}
+    </select>
+
+    <!-- 文件搜索只搜标题与备注：文件正文不进索引（二进制无意义），del_flag='0' 只搜未删除的 -->
+    <select id="searchAttachments" resultType="map">
+        SELECT 'file' AS module, id, original_name AS title,
+               LEFT(remark, 200) AS snippet_raw,
+               DATE_FORMAT(update_time, '%Y-%m-%d %H:%i') AS update_time
+        FROM t_attachment
+        <where>
+            del_flag = '0'
+            <if test="keyword != null and keyword != ''">
+                AND (original_name LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/'
+                OR remark LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/')
+            </if>
+        </where>
+        ORDER BY update_time DESC
+        LIMIT #{limit}
+    </select>
+
+    <!-- 计划：ownerId 非空 = 非超管只搜自己的（与 selectPlans 的数据范围一致） -->
+    <select id="searchPlans" resultType="map">
+        SELECT 'plan' AS module, id, plan_name AS title,
+               LEFT(plan_desc, 200) AS snippet_raw,
+               DATE_FORMAT(update_time, '%Y-%m-%d %H:%i') AS update_time
+        FROM t_gantt_plan
+        <where>
+            del_flag = '0'
+            <if test="ownerId != null and ownerId != ''">
+                AND create_by = #{ownerId}
+            </if>
+            <if test="keyword != null and keyword != ''">
+                AND (plan_name LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/'
+                OR plan_desc LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/')
+            </if>
+        </where>
+        ORDER BY update_time DESC
+        LIMIT #{limit}
+    </select>
+
+    <!-- 任务归属跟随计划：非超管按计划创建人过滤，与甘特详情页可见性一致 -->
+    <select id="searchTasks" resultType="map">
+        SELECT 'task' AS module, t.id, t.task_name AS title,
+               CONCAT('计划：', p.plan_name, ' ｜ ', LEFT(t.task_desc, 160)) AS snippet_raw,
+               DATE_FORMAT(t.update_time, '%Y-%m-%d %H:%i') AS update_time
+        FROM t_gantt_task t
+        JOIN t_gantt_plan p ON p.id = t.plan_id AND p.del_flag = '0'
+        <where>
+            t.del_flag = '0'
+            <if test="ownerId != null and ownerId != ''">
+                AND p.create_by = #{ownerId}
+            </if>
+            <if test="keyword != null and keyword != ''">
+                AND (t.task_name LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/'
+                OR t.task_desc LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/')
+            </if>
+        </where>
+        ORDER BY t.update_time DESC
+        LIMIT #{limit}
+    </select>
+</mapper>

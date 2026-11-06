@@ -1,6 +1,7 @@
 package com.example.erupt.config;
 
 import com.example.erupt.common.AuthContext;
+import com.example.erupt.common.RequestScopeCache;
 import com.example.erupt.repository.entity.User;
 import com.example.erupt.repository.mapper.UserMapper;
 import com.example.erupt.service.TokenService;
@@ -59,6 +60,7 @@ public class AuthInterceptor implements HandlerInterceptor {
     public boolean preHandle(HttpServletRequest request,
                              HttpServletResponse response,
                              Object handler) throws Exception {
+        RequestScopeCache.clear();
         if (!properties.isEnabled()) {
             return true;
         }
@@ -100,6 +102,7 @@ public class AuthInterceptor implements HandlerInterceptor {
                                 Exception ex) {
         // 无论正常返回还是抛异常都要清理，避免线程复用导致身份串号
         AuthContext.clear();
+        RequestScopeCache.clear();
     }
 
     /**

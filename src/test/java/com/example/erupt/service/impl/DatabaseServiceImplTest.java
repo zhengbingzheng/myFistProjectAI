@@ -205,7 +205,7 @@ class DatabaseServiceImplTest {
         assertThat(ex.resultCode()).isEqualTo(ResultCode.BAD_REQUEST);
         assertThat(ex.getMessage()).contains("mysql");
         verify(databaseMapper, never()).selectColumns(anyString(), anyString());
-        verify(databaseMapper, never()).selectTableData(anyString(), anyString(), anyString(), anyLong(), anyInt());
+        verify(databaseMapper, never()).selectTableData(anyString(), anyString(), anyString(), anyString(), anyLong(), anyInt());
     }
 
     @Test
@@ -252,6 +252,16 @@ class DatabaseServiceImplTest {
     }
 
     @Test
+    @DisplayName("queryTableData_字典项和智能体消息也属于敏感表")
+    void queryTableData_moreSensitiveTables_refused() {
+        for (String table : List.of("t_dict_item", "t_agent_message", "t_agent_conversation", "t_agent_data_audit")) {
+            assertThatThrownBy(() -> service.queryTableData("erupt-example", table, 1, 10))
+                    .isInstanceOf(BusinessException.class);
+        }
+        verify(databaseMapper, never()).selectColumns(anyString(), anyString());
+    }
+
+    @Test
     @DisplayName("queryTableData_total为0时只查列不发数据SQL")
     void queryTableData_zeroTotal_shortCircuit() {
         when(databaseMapper.selectColumns("erupt-example", "t_dict")).thenReturn(List.of(
@@ -264,7 +274,7 @@ class DatabaseServiceImplTest {
         assertThat(result.rows()).isEmpty();
         assertThat(result.columns()).hasSize(1);
         // 短路：total=0 时不应发 selectTableData
-        verify(databaseMapper, never()).selectTableData(anyString(), anyString(), anyString(), anyLong(), anyInt());
+        verify(databaseMapper, never()).selectTableData(anyString(), anyString(), anyString(), anyString(), anyLong(), anyInt());
     }
 
     @Test
@@ -274,7 +284,7 @@ class DatabaseServiceImplTest {
                 columnRow("id", "BIGINT", "bigint", "NO", "PRI", null, "", "id", 1),
                 columnRow("dict_name", "VARCHAR", "varchar(64)", "NO", "", null, "", "字典名", 2)));
         when(databaseMapper.countTableData("erupt-example", "t_dict")).thenReturn(2L);
-        when(databaseMapper.selectTableData(eq("erupt-example"), eq("t_dict"), anyString(), eq(0L), eq(10)))
+        when(databaseMapper.selectTableData(eq("erupt-example"), eq("t_dict"), anyString(), anyString(), eq(0L), eq(10)))
                 .thenReturn(List.of(
                         Map.of("id", 1, "dict_name", "状态"),
                         Map.of("id", 2, "dict_name", "类型")));
@@ -289,7 +299,7 @@ class DatabaseServiceImplTest {
         // 关键：拼到 SQL 的列列表是带反引号的合法字符串
         org.mockito.ArgumentCaptor<String> sqlCaptor = org.mockito.ArgumentCaptor.forClass(String.class);
         verify(databaseMapper).selectTableData(eq("erupt-example"), eq("t_dict"),
-                sqlCaptor.capture(), eq(0L), eq(10));
+                sqlCaptor.capture(), eq("ORDER BY `id`"), eq(0L), eq(10));
         assertThat(sqlCaptor.getValue()).isEqualTo("`id`, `dict_name`");
     }
 

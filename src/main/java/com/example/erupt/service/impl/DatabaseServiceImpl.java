@@ -47,9 +47,22 @@ public class DatabaseServiceImpl implements DatabaseService {
     private static final Set<String> SYSTEM_SCHEMAS = Set.of(
             "information_schema", "mysql", "performance_schema", "sys");
 
-    /** 敏感业务表：含密码哈希、私聊内容等，禁止通过"查表数据"接口批量导出。 */
+    /** 列名拼进 ORDER BY / SELECT 时只接受这种形式，反引号和连字符都进不来。 */
+    private static final Pattern SAFE_COLUMN = Pattern.compile("^[A-Za-z0-9_]{1,64}$");
+
+    /** 敏感业务表：含密码哈希、密钥、私聊、问数审计，禁止通过"查表数据"接口批量导出。 */
     private static final Set<String> SENSITIVE_TABLES = Set.of(
-            "t_user", "t_chat_message", "t_chat_conversation", "t_chat_member", "t_chat_attachment");
+            "t_user",
+            "t_dict_item",
+            "t_chat_message",
+            "t_chat_conversation",
+            "t_chat_member",
+            "t_chat_attachment",
+            "t_agent_message",
+            "t_agent_conversation",
+            "t_agent_data_audit",
+            "t_operation_log",
+            "t_login_log");
 
     /** 分页参数默认值与上限。 */
     private static final int DEFAULT_PAGE_SIZE = 10;
@@ -158,9 +171,10 @@ public class DatabaseServiceImpl implements DatabaseService {
         requireOffsetWithinLimit(offset);
         // 3) 行数与数据并行查：total 用于分页，data 用于当前页。
         long total = databaseMapper.countTableData(schema, table);
+        String orderBySql = "ORDER BY " + quoteColumn(columns.get(0).name());
         List<Map<String, Object>> rawRows = total == 0
                 ? List.of()
-                : databaseMapper.selectTableData(schema, table, columnListSql, offset, params.pageSize);
+                : databaseMapper.selectTableData(schema, table, columnListSql, orderBySql, offset, params.pageSize);
         // 每行转 LinkedHashMap 保列顺序；转一次避免 MyBatis 的 UnmodifiableMap 直接外泄给前端序列化层
         List<Map<String, Object>> rows = new ArrayList<>(rawRows.size());
         for (Map<String, Object> raw : rawRows) {
@@ -181,7 +195,7 @@ public class DatabaseServiceImpl implements DatabaseService {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < columns.size(); i++) {
             if (i > 0) sb.append(", ");
-            sb.append('`').append(columns.get(i).name()).append('`');
+            sb.append(quoteColumn(columns.get(i).name()));
         }
         return sb.toString();
     }
@@ -190,6 +204,14 @@ public class DatabaseServiceImpl implements DatabaseService {
      * 名称白名单校验：失败即抛 400。<b>这是 SQL 注入的唯一关口</b>，
      * mapper 里凡是用 {@code ${}} 拼接的标识符都必须可追溯到这里。
      */
+    /** 列名来自 information_schema，仍可能含反引号。不校验就拼进 SQL 会把标识符截断。 */
+    private static String quoteColumn(String name) {
+        if (name == null || !SAFE_COLUMN.matcher(name).matches()) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "列名不合法");
+        }
+        return "`" + name + "`";
+    }
+
     private static void requireValidName(String name) {
         if (name == null || !SAFE_NAME.matcher(name).matches()) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "名称不合法：" + name);

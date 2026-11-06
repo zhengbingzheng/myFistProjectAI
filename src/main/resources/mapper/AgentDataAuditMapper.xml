@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  AI 读库审计快照：只增不改——这里没有 update / delete 语句，
+  审计记录不允许通过任何路径被修改或删除（与 t_operation_log 同一原则）。
+-->
+<mapper namespace="com.example.erupt.repository.mapper.AgentDataAuditMapper">
+
+    <resultMap id="BaseResultMap" type="com.example.erupt.repository.entity.AgentDataAudit">
+        <result column="id" property="id" jdbcType="VARCHAR"/>
+        <result column="user_id" property="userId" jdbcType="VARCHAR"/>
+        <result column="question" property="question" jdbcType="VARCHAR"/>
+        <result column="sql_text" property="sqlText" jdbcType="VARCHAR"/>
+        <result column="row_count" property="rowCount" jdbcType="INTEGER"/>
+        <result column="elapsed_gen_ms" property="elapsedGenMs" jdbcType="BIGINT"/>
+        <result column="elapsed_query_ms" property="elapsedQueryMs" jdbcType="BIGINT"/>
+        <result column="success" property="success" jdbcType="TINYINT"/>
+        <result column="error_msg" property="errorMsg" jdbcType="VARCHAR"/>
+        <result column="create_time" property="createTime" jdbcType="TIMESTAMP"/>
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        id, user_id, question, sql_text, row_count, elapsed_gen_ms, elapsed_query_ms,
+        success, error_msg, create_time
+    </sql>
+
+    <!-- 附加条件片段：userId 可空 = 超管查全部 -->
+    <sql id="Condition_Where">
+        <if test="userId != null and userId != ''">
+            AND user_id = #{userId}
+        </if>
+    </sql>
+
+    <insert id="insert">
+        INSERT INTO t_agent_data_audit (id, user_id, question, sql_text, row_count,
+                                        elapsed_gen_ms, elapsed_query_ms, success, error_msg, create_time)
+        VALUES (#{id}, #{userId}, #{question}, #{sqlText}, #{rowCount},
+                #{elapsedGenMs}, #{elapsedQueryMs}, #{success}, #{errorMsg}, NOW(3))
+    </insert>
+
+    <select id="selectPage" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM t_agent_data_audit
+        <where>
+            <include refid="Condition_Where"/>
+        </where>
+        ORDER BY create_time DESC
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <select id="countPage" resultType="long">
+        SELECT COUNT(*) FROM t_agent_data_audit
+        <where>
+            <include refid="Condition_Where"/>
+        </where>
+    </select>
+</mapper>

@@ -3,6 +3,7 @@ package com.example.erupt.service.impl;
 import com.example.erupt.common.BusinessException;
 import com.example.erupt.common.JsonSupport;
 import com.example.erupt.common.ResultCode;
+import com.example.erupt.common.UpstreamEndpointPolicy;
 import com.example.erupt.model.dto.AgentChatRequest;
 import com.example.erupt.model.vo.AgentAttachmentVO;
 import com.example.erupt.model.vo.AgentChatVO;
@@ -17,6 +18,7 @@ import com.example.erupt.service.AgentService;
 import com.example.erupt.service.AttachmentResource;
 import com.example.erupt.service.AttachmentService;
 import com.example.erupt.service.DictService;
+import com.example.erupt.service.NotificationService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.annotation.PreDestroy;
@@ -52,9 +54,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 import java.util.regex.Matcher;
@@ -116,6 +119,11 @@ public class AgentServiceImpl implements AgentService {
     private final DictService dictService;
     /** 只读复用附件模块的能力（getResource 拿校验过的真实路径），不新增 / 不修改附件接口 */
     private final AttachmentService attachmentService;
+    /** 回复完成后的站内通知（通知服务自己挂在事务上，这里只管发） */
+    private final NotificationService notificationService;
+
+    /** 回复耗时超过该值才发「已回复」通知：短回答用户还在页面上等，推通知是骚扰 */
+    private static final long REPLY_NOTIFY_THRESHOLD_MS = 10_000;
 
     /** 连接 5s / 读 180s：thinking 模型一轮可能要跑几十秒，读超时必须给足 */
     private final RestClient restClient = RestClient.builder()
@@ -128,14 +136,21 @@ public class AgentServiceImpl implements AgentService {
             .build();
 
     /**
-     * 流式对话线程池：SSE 请求必须在独立线程里跑，否则会一直占着 Tomcat 请求线程。
-     * 4 个并发对当前使用规模足够；排队到满时直接提示稍后再试，不做无界排队。
+     * 流式对话线程池：SSE 必须离开 Tomcat 请求线程。
+     * 有界队列配 AbortPolicy，满了抛 RejectedExecutionException，由调用方提示稍后再试。
+     * newFixedThreadPool 的队列是无界的，那种写法永远不会拒绝。
      */
-    private final ExecutorService streamExecutor = Executors.newFixedThreadPool(4, r -> {
-        Thread thread = new Thread(r, "agent-stream");
-        thread.setDaemon(true);
-        return thread;
-    });
+    private final ThreadPoolExecutor streamExecutor = new ThreadPoolExecutor(
+            4, 4, 0L, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(8),
+            r -> {
+                Thread thread = new Thread(r, "agent-stream");
+                thread.setDaemon(true);
+                return thread;
+            },
+            new ThreadPoolExecutor.AbortPolicy());
+
+    private final UpstreamEndpointPolicy endpointPolicy;
 
     @PreDestroy
     void shutdownStreamExecutor() {
@@ -143,10 +158,13 @@ public class AgentServiceImpl implements AgentService {
     }
 
     public AgentServiceImpl(AgentMapper agentMapper, DictService dictService,
-                            AttachmentService attachmentService) {
+                            AttachmentService attachmentService, NotificationService notificationService,
+                            UpstreamEndpointPolicy endpointPolicy) {
         this.agentMapper = agentMapper;
         this.dictService = dictService;
         this.attachmentService = attachmentService;
+        this.notificationService = notificationService;
+        this.endpointPolicy = endpointPolicy;
     }
 
     private static SimpleClientHttpRequestFactory requestFactory() {
@@ -263,7 +281,30 @@ public class AgentServiceImpl implements AgentService {
                 emptyToNull(reasoning), ctx.model(), promptTokens, completionTokens, costMs, null);
         agentMapper.insertMessage(assistantMessage);
         agentMapper.touchConversation(ctx.conversation().getId(), ctx.model(), ctx.userId());
+        notifyReplyDone(ctx, content, costMs);
         return assistantMessage;
+    }
+
+    /**
+     * 回复完成通知：长回答动辄几十秒，用户多半已切去别的页面干等；
+     * 生成完推一条站内通知，点击跳回智能体页继续看。
+     *
+     * <p>只在耗时超过 10 秒时通知——短回答用户基本还盯着页面，每条都推反而变成骚扰。
+     * 通知失败绝不影响主流程：回复已经落库，推送只是锦上添花。</p>
+     */
+    private void notifyReplyDone(PreparedChat ctx, String content, int costMs) {
+        if (costMs < REPLY_NOTIFY_THRESHOLD_MS) {
+            return;
+        }
+        try {
+            String title = ctx.conversation().getTitle();
+            String shortTitle = title.length() > 20 ? title.substring(0, 20) + "…" : title;
+            String preview = content.length() > 80 ? content.substring(0, 80) + "…" : content;
+            notificationService.notify(ctx.userId(), "智能体已回复：" + shortTitle,
+                    preview, "agent", "/agent");
+        } catch (Exception e) {
+            log.warn("回复完成通知发送失败: {}", e.getMessage());
+        }
     }
 
     /**
@@ -300,14 +341,7 @@ public class AgentServiceImpl implements AgentService {
         // 让最后一块带上 usage，否则流式拿不到 token 统计，meta 行会缺数据
         body.put("stream_options", Map.of("include_usage", true));
 
-        URI endpoint;
-        try {
-            endpoint = URI.create(ctx.chatUrl());
-        } catch (IllegalArgumentException e) {
-            log.warn("字典 agent_config 的 chat_url 不是合法 URL: {}", ctx.chatUrl());
-            throw new BusinessException(ResultCode.INTERNAL_ERROR,
-                    "端点配置非法（chat_url=" + ctx.chatUrl() + "）：请到「系统管理 › 数据字典 › agent_config」检查");
-        }
+        URI endpoint = endpointPolicy.require(ctx.chatUrl());
 
         HttpRequest request = HttpRequest.newBuilder(endpoint)
                 .timeout(Duration.ofSeconds(300))
@@ -475,15 +509,7 @@ public class AgentServiceImpl implements AgentService {
         body.put("messages", messages);
         body.put("stream", false);
 
-        // 字典里的 chat_url 是运营时改的，配错不能让用户收到裸的 IllegalArgumentException 500
-        URI endpoint;
-        try {
-            endpoint = URI.create(chatUrl);
-        } catch (IllegalArgumentException e) {
-            log.warn("字典 agent_config 的 chat_url 不是合法 URL: {}", chatUrl);
-            throw new BusinessException(ResultCode.INTERNAL_ERROR,
-                    "端点配置非法（chat_url=" + chatUrl + "）：请到「系统管理 › 数据字典 › agent_config」检查");
-        }
+        URI endpoint = endpointPolicy.require(chatUrl);
 
         String raw;
         try {

@@ -1,6 +1,7 @@
 package com.example.erupt.service.impl;
 
 import com.example.erupt.common.AuthContext;
+import com.example.erupt.common.RequestScopeCache;
 import com.example.erupt.common.BusinessException;
 import com.example.erupt.common.ResultCode;
 import com.example.erupt.model.dto.MenuRequest;
@@ -382,7 +383,13 @@ public class MenuServiceImpl implements MenuService {
         if (userId == null || permission == null || permission.isBlank()) {
             return false;
         }
-        return menuMapper.countPermissionForUser(userId, permission) > 0;
+        Boolean cached = RequestScopeCache.permission(userId, permission);
+        if (cached != null) {
+            return cached;
+        }
+        boolean allowed = menuMapper.countPermissionForUser(userId, permission) > 0;
+        RequestScopeCache.rememberPermission(userId, permission, allowed);
+        return allowed;
     }
 
     @Override

@@ -79,9 +79,13 @@ src/main/resources/
 | 5 | `db/schema-tools-menu.sql` | 「工具箱」菜单（m22）及其授权——**纯前端页面，不建表、不加接口** | 需要工具箱时 |
 | 6 | `db/schema-agent.sql` | 智能体两张表（会话 / 消息）+ 字典种子 `agent_config` + 菜单（m23） | 需要智能体时 |
 | 7 | `db/schema-gantt.sql` | 时间规划三张表（计划 / 任务 / 依赖）+ 菜单（m24） | 需要甘特图时 |
-| 8 | `db/migrate_gantt_dependency_soft_delete.sql` | 老库升级：依赖表加 `del_flag`，唯一键改到生成列 `alive_from_to` | 仅升级已建过甘特图表的库 |
-| 9 | `db/migrate_knowledge_index.sql` | 知识库全文索引 `ft_knowledge_search` | 可选（关闭全文检索则不需要） |
-| 10 | `db/migrate_id_to_varchar32.sql` | 老库升级：`bigint` 主键转字符串并 `LPAD` 补零 | 仅从旧版本升级时 |
+| 8 | `db/schema-notification.sql` | 通知中心一张表（t_notification）+ 菜单（m25） | 需要通知中心时 |
+| 9 | `db/schema-usage.sql` | 菜单 m26 用量统计 / m27 AI 读库（无新表，聚合 t_agent_message） | 需要这两个功能时 |
+| 10 | `db/schema-reminder.sql` | t_notification 加 `biz_id`（事件去重）+ AI 读库审计表 t_agent_data_audit | 需要任务提醒 / 读库审计时 |
+| 11 | `db/schema-md-viewer.sql` | 工具箱子菜单 m28（纯前端页面，无新表、无接口） | 需要 MD 在线查看时 |
+| 12 | `db/migrate_gantt_dependency_soft_delete.sql` | 老库升级：依赖表加 `del_flag`，唯一键改到生成列 `alive_from_to` | 仅升级已建过甘特图表的库 |
+| 13 | `db/migrate_knowledge_index.sql` | 知识库全文索引 `ft_knowledge_search` | 可选（关闭全文检索则不需要） |
+| 14 | `db/migrate_id_to_varchar32.sql` | 老库升级：`bigint` 主键转字符串并 `LPAD` 补零 | 仅从旧版本升级时 |
 
 ```bash
 for f in schema.sql schema-im-menu.sql init-im-menu.sql schema-operation-log.sql schema-tools-menu.sql schema-agent.sql schema-gantt.sql; do
@@ -1536,6 +1540,163 @@ API 是无状态的，「上下文」必须每轮重新带上。本项目的做�
 页面正文长度按 0→23→96→139→153 递增，确认是渐进渲染而不是一次吐出；
 思考阶段点「停止」不产生空白回复，正文已输出后停止则已生成部分照常落库（前端 91 字 / 库中 101 字，
 差值来自断开瞬间仍在途的分片）；离开页面会主动断流，不让上游白跑。
+
+
+## 全局搜索 + 通知中心（第 1 步）
+
+两个模块互为配套：搜索解决「找内容」，通知解决「被推着看」。表结构与菜单见 `db/schema-notification.sql`。
+
+### 全局搜索（Ctrl+K）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/search?q=&limit=` | 跨模块联合搜索，每类最多 limit（默认 5）条，按模块分组返回 |
+
+覆盖五个模块：知识库（标题+正文）、AI 导航（名称/描述/标签）、文件（文件名/备注）、时间计划、甘特任务。
+可见性与各模块列表页**完全一致**：前三者是共享数据、所有登录用户同结果；
+甘特按数据范围隔离（非超管只搜自己创建的计划，任务的归属跟随其所属计划）——
+搜索给出的结果，用户点过去一定能看到。
+
+设计要点：
+
+- **`/api/search` 不挂菜单**：全局搜索是基础能力而非某个菜单的功能，挂 `MenuAccessInterceptor`
+  的放行清单（登录即可用），理由同 `/api/users/me`。
+- **每模块一条 SQL 各自 LIMIT**，服务层合并——不写 UNION 大 SQL：五个模块的
+  「按各自 update_time 取最新 N 条」语义在 UNION 里没法各自生效。
+- **单字关键词直接不搜**：LIKE '%单字%' 命中率高、价值低、五路全表扫还慢；
+  前端同步拦截（≥2 字符才发请求）。
+
+### 通知中心（t_notification + m25）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/notifications` | 分页（type / readFlag 可选），未读排最前 |
+| GET | `/api/notifications/unread-count` | 未读数（铃铛角标） |
+| PUT | `/api/notifications/{id}/read` | 标记单条已读 |
+| PUT | `/api/notifications/read-all` | 全部已读，返回实际条数 |
+| DELETE | `/api/notifications/{id}` | 软删除 |
+
+事件接入方式：任何模块调 `NotificationService.notify(userId, title, content, type, bizPath)`
+即可完成「落库 → 未读数回查 → WebSocket 推送」全链路。当前已接入的事件：
+
+- **智能体回复完成**（type=agent）：回复耗时超过 10 秒才通知——短回答用户还在页面上等，
+  每条都推是骚扰；第 3 步将接入任务提醒（type=task）。
+
+推送复用即时通信的 `/ws/chat` 连接（`ChatSessionRegistry`），新增帧
+`{"type":"notification","unread":N,"notification":{...}}`——一条连接按 type 分发，
+不开第二条 WebSocket；推送挂在事务提交后（`afterCommit`），不会出现「通知先到、数据未提交」。
+
+四个实现要点：
+
+- **归属字段是 `user_id`（接收人）**，不是 create_by——通知是「推给接收人」的数据；
+  所有查询在 SQL 层带 userId 条件，归属校验即查询本身。
+- **未读计数走 (user_id, read_flag, create_time) 联合索引**，O(未读数) 而非 O(总数)。
+- **前端轮询 60s 兜底**：WS 断线重连期间角标不能永远停在旧值。
+- **通知中心页面（/notifications）与顶栏抽屉分工**：抽屉只放最近 20 条做「快速看一眼」，
+  完整历史、类型筛选、删除走页面。
+
+实测（2026-11-06）：搜索「数据库」命中知识库 2 条、「验证」命中超管可见的甘特计划；
+智能体 600 字回复（约 40s）完成后未读数变 1，通知 type=agent、bizPath=/agent；
+手写 WS 客户端实测通知帧在回复完成瞬间（0.0s）到达，unread 数随帧携带；
+页面级验证：通知页行数、抽屉列表、全部已读后角标隐藏、Ctrl+K 弹层分组命中均正常。
+
+
+## 智能体用量统计 + AI 读库（第 2 步）
+
+菜单见 `db/schema-usage.sql`（m26 用量统计 / m27 AI 读库），不建新表。
+两个功能的 API 都挂在 `/api/agent/*` 下：URI 第二段是 agent，拦截器按「智能体」菜单鉴权——
+能用智能体就能查自己的用量；页面菜单用独立 permission（agent-usage / ai-data），
+超管可在角色管理里单独关掉这两个入口而不影响智能体本身。
+
+### 用量统计（m26）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/agent/usage?scope=me\|all&trendDays=30` | 汇总 + 模型分布 + 逐日趋势 +（超管）用户排行 |
+
+设计要点：
+
+- **数据源是 t_agent_message 的 assistant 行**——每次真实上游调用一条记录，
+  prompt_tokens / completion_tokens / cost_ms / model 都在行上，聚合即可，无需埋点；
+- **消息没有归属列**：统计 JOIN 会话表按 create_by 过滤（与「会话只对创建者可见」一致）；
+- **已删除会话的消耗也计入**：token 是真实花掉的，「用量」不随会话删除而消失；
+- **scope=all 仅超管生效**：普通用户传 all 静默降级为自己的数据；响应带 `canViewAll`
+  告知前端是否显示视角切换（曾出过「切换按钮只在全员视图下可见」的反逻辑 bug）；
+- **趋势图补零**：30 天窗口无消耗的天由后端补零行，图表时间轴才连续。
+
+### AI 读库（m27，Text-to-SQL 只读版）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/agent/ask-data` | `{question}` → AI 生成 SQL → 校验 → 只读执行 → SQL + 结果原样返回 |
+
+流程：读取当前库 `information_schema` 的表结构概览（缓存 5 分钟，剔除日志表）→
+连同问题喂给 GLM（temperature=0，只输出一条 SELECT）→ 三道防线 → 返回。
+
+三道防线（缺一不可）：
+
+1. **形态校验**：只允许单条 SELECT / WITH 开头；剥 markdown 围栏；多语句拒绝；
+   写关键词（INSERT/UPDATE/DELETE/DROP/…）用 `\b` 词边界匹配——`update_time` 列名不会误杀；
+2. **强制 LIMIT**：语句没有 LIMIT 自动补 `LIMIT 100`，行数上限由系统决定，不能由 AI 决定；
+3. **连接只读**：`setReadOnly(true)` + `setMaxRows(100)` + 15s 查询超时，校验漏网也执行不了写操作。
+
+两个原则：
+
+- **SQL 原样展示**：可审计是底线，用户要能看到「AI 用什么语句查出了这个结果」；
+- **prompt 里的 `%` 要转义**：`formatted` 把 `LIKE '%关键词%'` 的 `%关` 当成了格式符
+  （`UnknownFormatConversionException: Conversion = '关'`），必须写 `%%`——已踩过一次的坑。
+
+实测（2026-11-06）：超管汇总 3 会话 / 20 回复 / 42,577 tokens / 223.6s，glm-5.3-flash 与 glm-5.3
+分布正确，用户排行与全员切换正常；AI 读库四个问题全部命中（用户数=7、文档数=13、
+最近导航、按模型统计），SQL 合理、执行 13-39ms；「删除所有导航」被 AI 自觉转为 SELECT、
+「drop table t_user」被形态校验拦截；页面卡片 / 趋势 / 排行 / SQL 折叠块 / 结果表渲染正常。
+
+
+## 任务提醒 + AI 读库审计（第 3 步）
+
+迁移见 `db/schema-reminder.sql`：t_notification 加 `biz_id`（事件去重锚点）+
+新表 `t_agent_data_audit`（AI 读库审计快照）。
+
+### 任务到期提醒（type=task）
+
+| 入口 | 说明 |
+|---|---|
+| 定时 | 每日上午 9 点自动扫描（`@Scheduled`，主类 `@EnableScheduling`） |
+| 手动 | `POST /api/gantt/reminders/run`（仅超管）——「提醒没发出来？」不用等到第二天上午 |
+
+规则（在 SQL 层实现，`GanttMapper.selectTasksDueReminder`）：
+
+- **提醒范围**：未完成（status != 'done'）且 end_date 在今天 ~ +3 天内（含已逾期与今天到期）；
+- **去重**：同一任务（biz_id + type=task）3 天内发过通知就不再返回，走 (biz_id, type) 索引——
+  `biz_id` 是本次迁移给 t_notification 加的列，biz_path 只存路由、title 是给人看的文本，
+  都不适合做精确匹配，只有业务对象 id 是稳定锚点；
+- **停发**：任务 status 变 done 自动停发；用户删掉提醒通知后仍可能再收到——
+  软删记录不参与去重，删掉提醒等于要求换条新的再提醒；
+- **接收人是计划创建者**（p.create_by）：任务的 assignee 是自由文本、不保证对得上用户表；
+- **溢出保护**：单轮 LIMIT 200，`runOnce` 加 synchronized 防手动触发与定时扫描并发双发。
+
+### AI 读库审计快照（t_agent_data_audit）
+
+ask-data 的成功与失败都落一条快照：谁问了什么（原文）、AI 生成了什么 SQL、
+结果多少行、成功与否与拦截原因。**没有失败记录，「被拦截」和「没问过」就无法区分**。
+
+- 只增不改：无 update_time / del_flag，Mapper 里根本没有 update/delete 方法，
+  唯一入口 `GET /api/agent/data-audit`（仅超管，分页）——审计落库失败只记 warn 不影响主流程；
+- 前端入口在用量统计页的超管区块（canViewAll 控制，前端不自己判断角色）。
+
+### 踩坑：跨表 JOIN 的排序规则冲突
+
+`t_notification` / `t_agent_data_audit` 建表时写了 `utf8mb4_general_ci`，而库内业务表主流是
+`utf8mb4_0900_ai_ci`——提醒扫描的 `n.biz_id = t.id` 直接炸
+`Illegal mix of collations (utf8mb4_general_ci,IMPLICIT) and (utf8mb4_0900_ai_ci,IMPLICIT)`。
+修法是 `ALTER TABLE ... CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci`
+统一到业务主流（比在 SQL 里逐处 COLLATE 补丁干净），三个 schema 文件同步更正。
+**新建表必须先看库内已有表的排序规则**，不要想当然写默认值。
+
+实测（2026-11-06）：手动触发首轮返回 21（探针 2 条 + 全库其他到期任务各归其主），
+探针收件箱「今天截止」「已逾期 5 天」两条文案正确；二次触发返回 0（去重生效）；
+任务置 done 后再触发只重提逾期任务（停发生效）；审计快照成功与拦截各 1 条、
+SQL / 行数 / 拦截原因齐全；用量页审计区块渲染正常。
 
 
 ## 约定说明
