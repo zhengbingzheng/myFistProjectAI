@@ -55,8 +55,8 @@ public interface MenuService {
 
     void deleteRole(String id);
 
-    /** 给角色授权菜单（全量覆盖） */
-    int grantMenusToRole(String roleId, List<String> menuIds, String operator);
+    /** 给角色授权菜单（全量覆盖）。operatorId 用于「只能授出自己拥有的菜单」校验。 */
+    int grantMenusToRole(String roleId, List<String> menuIds, String operatorId, String operator);
 
     List<String> menuIdsOfRole(String roleId);
 

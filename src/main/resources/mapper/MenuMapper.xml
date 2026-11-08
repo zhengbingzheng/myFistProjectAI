@@ -36,6 +36,12 @@
             <if test="visible != null">visible = #{visible},</if>
             <if test="permission != null">permission = #{permission},</if>
             <if test="remark != null">remark = #{remark},</if>
+            <!--
+              软删必须走这里：deleteMenu 传的是一个只有 id + delFlag 的补丁对象，
+              少了这一行 <set> 会为空，拼出 "UPDATE t_menu WHERE id=..." 直接 500；
+              即使不报错，del_flag 也永远不会被写成 '1'。
+            -->
+            <if test="delFlag != null">del_flag = #{delFlag},</if>
         </set>
         WHERE id = #{id} AND del_flag = '0'
     </update>
@@ -93,6 +99,8 @@
             <if test="roleLevel != null">role_level = #{roleLevel},</if>
             <if test="description != null">description = #{description},</if>
             <if test="updateBy != null">update_by = #{updateBy},</if>
+            <!-- 同 updateMenu：deleteRole 只带 id + delFlag，缺这一行会 500 且删不掉 -->
+            <if test="delFlag != null">del_flag = #{delFlag},</if>
         </set>
         WHERE id = #{id} AND del_flag = '0'
     </update>

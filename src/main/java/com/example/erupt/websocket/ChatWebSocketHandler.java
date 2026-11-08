@@ -50,6 +50,13 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             closeQuietly(session);
             return;
         }
+        // 单用户连接数上限：ticket 可无限签发，没有上限时一个账号就能用连接对象打满堆内存
+        if (registry.countSessions(userId) >= ChatSessionRegistry.MAX_SESSIONS_PER_USER) {
+            log.warn("WebSocket 连接数超过上限，拒绝建连 userId={} 现有={} 上限={}",
+                    userId, registry.countSessions(userId), ChatSessionRegistry.MAX_SESSIONS_PER_USER);
+            closeQuietly(session);
+            return;
+        }
         // 只在"该用户的第一条连接"时广播上线：多标签页同时打开不该给对端发一串重复通知。
         // 判断由 register 在锁内原子返回——注册后再读 countSessions 会在并发建连时漏报
         if (registry.register(userId, session)) {

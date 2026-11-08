@@ -128,7 +128,7 @@
                 AND p.create_by = #{ownerId}
             </if>
             <if test="keyword != null and keyword != ''">
-                AND p.plan_name LIKE CONCAT('%', #{keyword}, '%')
+                AND p.plan_name LIKE CONCAT('%', #{keyword}, '%') ESCAPE '/'
             </if>
         </where>
         GROUP BY p.id

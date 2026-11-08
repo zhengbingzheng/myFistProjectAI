@@ -1943,3 +1943,42 @@ online.value = isChatConnected()   // 此刻 socket 还在 CONNECTING，必然 f
 | 缩放 | 日 / 周 / 月切换正常（滚动宽度 1796 / 657 / 1164） |
 | 编辑 | 点击任务条打开弹窗，名称回填正确；新建任务保存后立即出现在图上并刷新统计 |
 | 移动端 390px | 自动切卡片视图，无横向溢出 |
+
+## 安全加固记录（2026-11-08）
+
+本轮按「可复现再利用」的标准做了一次审计，下面只列**已确认并修复**的问题与**行为变化**；
+每条都在真实 MySQL / 启动实例上复现过（SQL 绕过用 `EXPLAIN` 与 SELECT 验证，HTTP 项用 18080 实例验证）。
+
+| # | 问题 | 修复 |
+|---|---|---|
+| 1 | `ReadSqlGuard` 的 CTE 同名遮蔽：`WITH t_user AS (SELECT * FROM t_user) SELECT * FROM t_user` 让凭证表整表可读 | CTE 名与真实表同名直接拒绝；执行前再用 `EXPLAIN FORMAT=JSON` 复核 MySQL 实际访问的表（`AgentDataServiceImpl#explainAccessedTables`），文本正则 + 解析结果双保险 |
+| 2 | 括号表引用 `FROM t_knowledge, (t_user)` 对提取器不可见 | `FROM (表名)` 直接拒绝；派生表 `FROM (SELECT …)` 仍允许（内层 FROM 会被继续扫描） |
+| 3 | 末尾 LIMIT 剥离作用在未屏蔽原文：`WHERE title = 'limit 3'` 被改写成 `''`，子查询 `LIMIT 1` 被删 | 只匹配**末尾**的顶层 LIMIT；字符串与子查询里的 LIMIT 原样保留 |
+| 4 | `PUT /api/menu/roles/{id}` 不校验角色「现有等级」：1 级管理员可把超管角色改成 10 级，再分配给自己 | `updateRole` 先比较现有等级，高于操作者一律 403；`grantMenusToRole` 同时要求「只能授出自己已拥有的菜单」（顶级管理员除外） |
+| 5 | 登录失败计数用原始用户名，而 `t_user.username` 是大小写不敏感排序规则：换大小写即可重置锁定/验证码桶 | `LoginAttemptService#scope` 统一 `trim + toLowerCase` |
+| 6 | 防枚举的 dummy BCrypt 哈希只有 59 字符，格式预校验直接返回，账号不存在时快约 80ms | 换成合法的 60 字符哈希（`AuthServiceImplTest` 锁定格式与长度） |
+| 7 | local 档下随包分发的公开密钥被继续使用；Redis 不可用时验签即放行，等于可离线伪造任意 Token | local/dev/test 检测到弱默认值时**替换为进程内随机 32 字节密钥**；非本地档仍直接拒绝启动。多实例部署必须显式注入 `AUTH_TOKEN_SECRET` |
+| 8 | 异步请求（SSE / `Callable` / `StreamingResponseBody`）不触发 `afterCompletion`，`AuthContext` 残留在容器线程上 | `AuthInterceptor` 改为 `AsyncHandlerInterceptor`，`preHandle` 与 `afterConcurrentHandlingStarted` 都清理身份 |
+| 9 | 改密 / 重置密码 / 禁用 / 删号只吊销 HTTP 会话，已建立的 WebSocket 仍持续收到含消息正文的未读推送 | `ChatSessionRegistry.closeUser` 在上述路径同步关闭该用户全部连接；单用户连接数上限 8 |
+| 10 | 聊天历史分页无深分页上限（其余模块都有 100k 防线） | `ChatServiceImpl` 增加 `MAX_OFFSET = 100_000` |
+| 11 | `deleteRole` / `deleteMenu` 真实调用 500：补丁对象只带 `id + delFlag`，而 `updateRole`/`updateMenu` 的 `<set>` 没有 `del_flag`，拼出 `UPDATE t_role WHERE …` | XML 补 `del_flag` 条件写；回读列表/树确认已消失（此前单测 mock 掉了 Mapper，所以没暴露） |
+| 12 | 附件目录「互不包含」只校验了 `chat ⊂ uploads` 一个方向 | 双向 `startsWith` 校验 |
+| 13 | 附件异常原文回显（`FileSystemException` 含服务器绝对路径）；ZIP 条目名依赖上传侧净化；扩展名未限制字符集 | 对外固定文案、细节只进日志；打包时再次净化条目名；扩展名收紧为 `[a-z0-9]{1,16}` |
+| 14 | `agent_config` 脱敏按 label 黑名单，改个名字/新增项即明文泄漏 | 改为白名单：普通用户只返回 `default_model` / `system_prompt` |
+| 15 | 甘特依赖恢复绕过成环校验（删依赖→建新边→恢复）；计划列表 LIKE 未转义 | 三条恢复路径（plan/task/dependency）恢复前重新 `requireNoCycle`；`plan_name LIKE … ESCAPE '/'` 并接 `LikeEscape` |
+| 16 | 问数敏感表与库表浏览口径不一致（超管可经问数读 AI 私聊）；视图会被当合法表进入白名单 | `t_agent_message` / `t_agent_conversation` 移入凭证表；schema 快照只取 `BASE TABLE` |
+| 17 | 智能体流式线程池全局 4 线程，单账号可占满导致所有用户 429 | 单账号并发流上限 2，超限直接返回提示 |
+
+**运维需要知道的行为变化**
+
+- 未显式配置 `AUTH_TOKEN_SECRET` 时，每次启动都会生成新的随机密钥：单实例无感，**多实例/重启后旧 Token 会全部失效**，生产必须显式注入。
+- AI 读库多了一次 `EXPLAIN` 校验（只读、不执行），SQL 里出现与真实表同名的 CTE / 括号表名会被拒绝。
+- 菜单/角色删除现在真的会写 `del_flag='1'`（以前是 500 或静默删不掉）。
+
+**审计确认存在、但本轮未改的问题（需要产品/运维决策）**
+
+- **附件模块没有行级归属**：`attachments` 菜单被授予非超管后，该角色可看到并删除所有人上传的文件。这是「共享文件库」的产品模型，不是代码缺陷；若要改成个人文件，需要同步改列表、下载、回收站与搜索。
+- 同级管理员可互相重置密码/禁用（`requireNotAboveTarget` 用 `>` 而非 `>=`），是否允许取决于管理组织结构。
+- 验证码在 Redis 故障时 fail-open（`CaptchaService.verify` 返回 true）、改密后的会话吊销失败只记 warn：两处都是「安全 vs 可用性」的显式取舍，当前选择可用性优先。
+- 反向代理部署未配 `server.forward-headers-strategy` 时，登录锁定的 IP 维度会退化为代理 IP；问数仍复用主数据源（建议单独建只读账号）。
+- WebSocket 推送仍在请求线程同步写、无发送超时，慢客户端可拖住发送方线程（有界，但未异步化）。

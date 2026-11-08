@@ -55,10 +55,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -124,6 +126,15 @@ public class AgentServiceImpl implements AgentService {
 
     /** 回复耗时超过该值才发「已回复」通知：短回答用户还在页面上等，推通知是骚扰 */
     private static final long REPLY_NOTIFY_THRESHOLD_MS = 10_000;
+
+    /**
+     * 单个账号的并发流式上限。全局只有 4 条流线程，没有按用户限流时，
+     * 一个账号连开 12 条流就能让所有用户的流式对话持续 429（全局池被占满）。
+     */
+    private static final int MAX_CONCURRENT_STREAMS_PER_USER = 2;
+
+    /** userId → 正在运行的流式对话数 */
+    private final Map<String, AtomicInteger> activeStreams = new ConcurrentHashMap<>();
 
     /** 连接 5s / 读 180s：thinking 模型一轮可能要跑几十秒，读超时必须给足 */
     private final RestClient restClient = RestClient.builder()
@@ -198,14 +209,36 @@ public class AgentServiceImpl implements AgentService {
         PreparedChat ctx = prepareChat(userId, request);
         // 5 分钟上限：thinking 模型长回答可能跑一两分钟，留足余量后由上游超时兜底
         SseEmitter emitter = new SseEmitter(300_000L);
+
+        // 先占坑再提交：单账号并发超过上限时直接拒绝，不让它把全局 4 条流线程吃光
+        AtomicInteger running = activeStreams.computeIfAbsent(userId, k -> new AtomicInteger());
+        if (running.incrementAndGet() > MAX_CONCURRENT_STREAMS_PER_USER) {
+            running.decrementAndGet();
+            sendErrorQuietly(emitter, "同一账号同时进行的对话过多，请等上一轮结束后再试");
+            emitter.complete();
+            return emitter;
+        }
         try {
-            streamExecutor.execute(() -> runStream(emitter, ctx));
+            streamExecutor.execute(() -> {
+                try {
+                    runStream(emitter, ctx);
+                } finally {
+                    releaseStream(userId);
+                }
+            });
         } catch (RejectedExecutionException e) {
             // 线程池满了：明确告诉用户稍后再试，而不是让请求悬挂到超时
+            releaseStream(userId);
             sendErrorQuietly(emitter, "当前对话人数较多，请稍后重试");
             emitter.complete();
         }
         return emitter;
+    }
+
+    /** 释放一条流式占坑；归零时移除 key，避免用户量增长后 Map 只增不减。 */
+    private void releaseStream(String userId) {
+        activeStreams.computeIfPresent(userId, (key, running) ->
+                running.decrementAndGet() <= 0 ? null : running);
     }
 
     /**

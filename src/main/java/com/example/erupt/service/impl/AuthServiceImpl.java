@@ -46,9 +46,16 @@ public class AuthServiceImpl implements AuthService {
      * 一个永远不会匹配任何密码的 BCrypt 哈希，编译期固定。
      * 用途：当账号不存在时，调用一次 matches(...) 来"耗时间"，
      * 让正常登录（账号存在但密码错）和异常登录（账号不存在）的耗时基本一致。
+     *
+     * <p><b>必须是合法的 60 字符 BCrypt 串</b>：{@code BCryptPasswordEncoder.matches}
+     * 会先用正则校验格式，格式不对会直接返回 false、根本不跑哈希计算。
+     * 之前这里少了 1 个字符（59 位），于是"账号不存在"分支不到 1ms 就返回，
+     * 而"账号存在但密码错"要跑 ~80ms——登录接口变成一个账号存在性探针。
+     * 这串由 {@code new BCryptPasswordEncoder().encode(...)} 生成后固定，
+     * 每次启动重新生成没有意义，反而让单元测试无法锁定长度。</p>
      */
     private static final String DUMMY_PASSWORD_HASH =
-            "$2a$10$CwTycUXWue0Thq9StjUM0uJ8DHyqJ8p9VHjQ7V5Q5Q5Q5Q5Q5Q5O";
+            "$2a$10$NhCL.XdeYdHEULJ3DoCAkev8RhdOeb4fxoAk25JWkFYOPdTO3Rjku";
 
     private static final UserConverter CONVERTER = Mappers.getMapper(UserConverter.class);
 

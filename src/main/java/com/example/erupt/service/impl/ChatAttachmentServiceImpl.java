@@ -54,10 +54,13 @@ public class ChatAttachmentServiceImpl implements ChatAttachmentService {
         // 都以文件管理根目录为界，一旦嵌套就会把聊天附件一起卷走，两个功能又缠在一起了。
         // 这种错配从日志里很难看出来，所以在启动时直接失败，让配置问题当场暴露。
         Path fileStorageRoot = Path.of(fileStorageDir).toAbsolutePath().normalize();
-        if (storageRoot.startsWith(fileStorageRoot)) {
+        // 双向都必须校验：只查 chat ⊂ uploads 时，把 uploads 配到 chat-uploads 子目录
+        // 同样违反"互不包含"，但旧判断会放行——而那正是备份/清理脚本会误伤的场景。
+        if (storageRoot.startsWith(fileStorageRoot) || fileStorageRoot.startsWith(storageRoot)) {
             throw new IllegalStateException(String.format(
-                    "聊天附件目录 %s 位于文件管理目录 %s 内，两者必须互不包含。"
-                            + "请调整 app.chat.attachment.storage-dir。", storageRoot, fileStorageRoot));
+                    "聊天附件目录 %s 与文件管理目录 %s 互相包含（或相同），两者必须互不包含。"
+                            + "请调整 app.chat.attachment.storage-dir / app.attachment.storage-dir。",
+                    storageRoot, fileStorageRoot));
         }
 
         try {
@@ -144,7 +147,9 @@ public class ChatAttachmentServiceImpl implements ChatAttachmentService {
             log.info("聊天附件上传成功 id={} name={} size={}B uploader={}", id, originalName, size, uploaderId);
             return entity;
         } catch (IOException e) {
-            throw new BusinessException(ResultCode.INTERNAL_ERROR, "附件保存失败：" + e.getMessage());
+            // 异常原文可能包含服务器绝对路径（FileSystemException），只进日志不回显
+            log.warn("聊天附件保存失败 name={} 原因={}", originalName, e.getMessage());
+            throw new BusinessException(ResultCode.INTERNAL_ERROR, "附件保存失败，请联系管理员");
         } finally {
             // 入库失败时文件已经落盘，必须显式清理，否则留下永远查不到的孤儿文件
             if (!persisted) {

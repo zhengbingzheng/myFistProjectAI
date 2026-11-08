@@ -143,8 +143,15 @@ public class LoginAttemptService {
 
     /**
      * 计数维度：账号 + 客户端 IP。用 | 分隔——账号经校验只含字母数字下划线，不会与 | 冲突。
+     *
+     * <p><b>账号必须先统一大小写</b>：{@code t_user.username} 是
+     * {@code utf8mb4_0900_ai_ci}（大小写不敏感），{@code selectByUsername('ADMIN')} 能登进
+     * {@code admin} 账号；而旧实现用原始字符串做 key，{@code ADMIN|ip} 与 {@code admin|ip}
+     * 是两个互不相干的桶。攻击者只要换大小写，就能把「5 次/15 分钟」放大成几十次，
+     * 同时绕过验证码阈值。统一小写后，能登录成功的写法与计入同一个失败桶的写法保持一致。</p>
      */
     private static String scope(String username, String clientIp) {
-        return username + "|" + (clientIp == null || clientIp.isBlank() ? "unknown" : clientIp);
+        String account = username == null ? "" : username.trim().toLowerCase(java.util.Locale.ROOT);
+        return account + "|" + (clientIp == null || clientIp.isBlank() ? "unknown" : clientIp);
     }
 }

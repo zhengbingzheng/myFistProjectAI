@@ -1,6 +1,5 @@
 package com.example.erupt.service.impl;
 
-import com.example.erupt.common.AuthContext;
 import com.example.erupt.common.RequestScopeCache;
 import com.example.erupt.common.BusinessException;
 import com.example.erupt.common.ResultCode;
@@ -222,6 +221,16 @@ public class MenuServiceImpl implements MenuService {
     @Transactional(rollbackFor = Exception.class)
     public RoleVO updateRole(String id, RoleRequest request, String operatorId, String operator) {
         Role existing = requireRole(id);
+        // 不能修改比自己等级更高的角色。旧实现只校验「新等级」(requireNoEscalation)，
+        // 不看角色「现有等级」——level=1 的管理员可以把超级管理员角色(0)改成 10，
+        // 再通过 grantRolesToUser 分配给自己：后者只看角色的「当前」等级，改完就一路放行，
+        // 整条等级防线被绕过。deleteRole 对 0 级角色有保护，编辑接口同样必须有。
+        int ownLevel = userLevel(operatorId);
+        int existingLevel = existing.getRoleLevel() == null ? Integer.MAX_VALUE : existing.getRoleLevel();
+        if (existingLevel < ownLevel) {
+            throw new BusinessException(ResultCode.FORBIDDEN,
+                    "无权修改该角色（角色等级高于当前操作者）");
+        }
         // roleCode 是程序内引用的稳定标识，编辑接口不接受修改
         existing.setRoleName(request.roleName());
         if (request.roleLevel() != null) {
@@ -259,25 +268,41 @@ public class MenuServiceImpl implements MenuService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public int grantMenusToRole(String roleId, List<String> menuIds, String operator) {
-        Role role = menuMapper.selectRoleById(roleId);
-        if (role == null) {
-            throw new BusinessException(ResultCode.NOT_FOUND, "角色不存在");
-        }
+    public int grantMenusToRole(String roleId, List<String> menuIds, String operatorId, String operator) {
+        Role role = requireRole(roleId);
+        int ownLevel = userLevel(operatorId);
         // 二次鉴权：操作者不能给比自己等级更高的角色授权菜单（数字越小越高，0=超管）。
         // 漏了这道防线，普通管理员就能借"给超管角色配菜单"变相提权
         int roleLevel = role.getRoleLevel() == null ? Integer.MAX_VALUE : role.getRoleLevel();
-        if (roleLevel < userLevel(AuthContext.currentUserId())) {
+        if (roleLevel < ownLevel) {
             throw new BusinessException(ResultCode.FORBIDDEN,
                     "无权给该角色授权菜单（角色等级高于当前操作者）");
-        }
-        menuMapper.deleteRoleMenusByRoleId(roleId);
-        if (menuIds == null || menuIds.isEmpty()) {
-            return 0;
         }
         Set<String> validMenuIds = new HashSet<>();
         for (Menu menu : menuMapper.selectAllMenus()) {
             validMenuIds.add(menu.getId());
+        }
+        // 只能授出自己实际拥有的菜单：菜单 = 模块 API 的访问权，若允许同级管理员
+        // 随意勾选，持有「菜单/角色管理」的人可以把自己的角色扩成全部模块，
+        // 等级限制形同虚设。顶级管理员（level=0）不受限，负责初始授权。
+        if (ownLevel > 0 && menuIds != null && !menuIds.isEmpty()) {
+            Set<String> ownMenuIds = new HashSet<>();
+            for (Menu menu : menuMapper.selectMenusByUserId(operatorId)) {
+                ownMenuIds.add(menu.getId());
+            }
+            List<String> unauthorized = menuIds.stream()
+                    .filter(id -> id != null && validMenuIds.contains(id))
+                    .filter(id -> !ownMenuIds.contains(id))
+                    .distinct()
+                    .toList();
+            if (!unauthorized.isEmpty()) {
+                throw new BusinessException(ResultCode.FORBIDDEN,
+                        "不能授予自己未拥有的菜单权限：" + String.join(",", unauthorized));
+            }
+        }
+        menuMapper.deleteRoleMenusByRoleId(roleId);
+        if (menuIds == null || menuIds.isEmpty()) {
+            return 0;
         }
         List<RoleMenu> relations = new ArrayList<>();
         for (String menuId : new HashSet<>(menuIds)) {

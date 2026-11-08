@@ -225,9 +225,60 @@ public class AgentDataServiceImpl implements AgentDataService {
     /**
      * 形态、表白名单和行数上限都在 {@link ReadSqlGuard}。
      * 连接只读只兜写操作，挡不住把密码哈希 SELECT 出来，所以不能只靠它。
+     *
+     * <p>正则校验之后还要用 {@code EXPLAIN} 复核一次实际访问的表：CTE 同名遮蔽、
+     * 括号表引用这类写法能让文本提取器漏看真实表，而 MySQL 自己的解析结果不会。</p>
      */
     private String validateAndNormalize(String raw, boolean superAdmin) {
-        return ReadSqlGuard.normalize(raw, snapshot().tables(), superAdmin);
+        Set<String> knownTables = snapshot().tables();
+        String sql = ReadSqlGuard.normalize(raw, knownTables, superAdmin);
+        ReadSqlGuard.verifyAccessedTables(explainAccessedTables(sql), knownTables, superAdmin);
+        return sql;
+    }
+
+    /**
+     * 用 {@code EXPLAIN FORMAT=JSON} 取"这条 SQL 实际会访问的表"。
+     *
+     * <p>EXPLAIN 只做解析与优化，不返回业务数据；查询非法或引用了当前账号无权访问的对象时
+     * 会直接报错，这里按拒绝处理（fail-closed）。输出里的 {@code <derived2>} 等伪表名
+     * 由 {@link ReadSqlGuard#verifyAccessedTables} 忽略。</p>
+     */
+    private Set<String> explainAccessedTables(String sql) {
+        try (Connection conn = dataSource.getConnection();
+             Statement stmt = conn.createStatement()) {
+            conn.setReadOnly(true);
+            try (ResultSet rs = stmt.executeQuery("EXPLAIN FORMAT=JSON " + sql)) {
+                if (!rs.next()) {
+                    return Set.of();
+                }
+                String json = rs.getString(1);
+                if (json == null || json.isBlank()) {
+                    return Set.of();
+                }
+                Set<String> tables = new HashSet<>();
+                collectExplainedTables(MAPPER.readTree(json), tables);
+                return tables;
+            }
+        } catch (SQLException | java.io.IOException e) {
+            log.warn("AI 读库 EXPLAIN 复核失败（按拒绝处理）: {} sql={}", e.getMessage(), sql);
+            throw new BusinessException(ResultCode.BAD_REQUEST, "查询无法通过安全校验，请换个问法");
+        }
+    }
+
+    /** 递归收集 EXPLAIN JSON 里的 table_name（结构随执行计划嵌套/数组，不能只取一层）。 */
+    private static void collectExplainedTables(JsonNode node, Set<String> tables) {
+        if (node == null) {
+            return;
+        }
+        if (node.isObject()) {
+            JsonNode tableName = node.get("table_name");
+            if (tableName != null && tableName.isTextual()) {
+                tables.add(tableName.asText());
+            }
+            node.fields().forEachRemaining(entry -> collectExplainedTables(entry.getValue(), tables));
+        } else if (node.isArray()) {
+            node.forEach(child -> collectExplainedTables(child, tables));
+        }
     }
 
     /* ---------- 只读执行 ---------- */
@@ -325,6 +376,9 @@ public class AgentDataServiceImpl implements AgentDataService {
                 SELECT table_name, column_name, column_type, column_comment
                 FROM information_schema.columns
                 WHERE table_schema = DATABASE()
+                  AND table_name IN (
+                      SELECT table_name FROM information_schema.tables
+                      WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE')
                 ORDER BY table_name, ordinal_position""";
         StringBuilder admin = new StringBuilder();
         StringBuilder shared = new StringBuilder();

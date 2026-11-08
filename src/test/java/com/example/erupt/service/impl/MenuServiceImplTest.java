@@ -244,6 +244,23 @@ class MenuServiceImplTest {
     }
 
     @Test
+    @DisplayName("updateRole_目标角色现有等级高于操作者_403且不写库")
+    void updateRole_modifyHigherLevelRole_rejected() {
+        // 旧实现只看「新等级」：level=1 的管理员把超级管理员角色(0)改成 10，
+        // 再分配给自己就能拿到 ROLE_SUPER_ADMIN
+        when(menuMapper.selectRoleById("r_super")).thenReturn(role("r_super", 0));
+        when(menuMapper.selectUserMinRoleLevel("op-1")).thenReturn(1);
+
+        assertThatThrownBy(() -> menuService.updateRole("r_super", new RoleRequest(
+                "ROLE_SUPER_ADMIN", "超级管理员", 10, null), "op-1", "admin"))
+                .isInstanceOf(BusinessException.class)
+                .extracting(ex -> ((BusinessException) ex).resultCode())
+                .isEqualTo(ResultCode.FORBIDDEN);
+
+        verify(menuMapper, never()).updateRole(any());
+    }
+
+    @Test
     @DisplayName("updateRole_记录操作者到update_by审计字段")
     void updateRole_recordsUpdateBy() {
         when(menuMapper.selectRoleById("r_user")).thenReturn(role("r_user", 10));
@@ -268,6 +285,39 @@ class MenuServiceImplTest {
                 .isInstanceOf(BusinessException.class)
                 .extracting(ex -> ((BusinessException) ex).resultCode())
                 .isEqualTo(ResultCode.NOT_FOUND);
+    }
+
+    @Test
+    @DisplayName("grantMenusToRole_非顶级管理员授予自己未拥有的菜单_403且不写库")
+    void grantMenusToRole_unauthorizedMenu_rejected() {
+        // 持有「菜单管理」的同级管理员不能把 users/attachments 等模块授给自己的角色
+        when(menuMapper.selectRoleById("r_admin")).thenReturn(role("r_admin", 10));
+        when(menuMapper.selectUserMinRoleLevel("op-1")).thenReturn(10);
+        when(menuMapper.selectAllMenus()).thenReturn(List.of(menu("m01", "0"), menu("m20", "0")));
+        when(menuMapper.selectMenusByUserId("op-1")).thenReturn(List.of(menu("m01", "0")));
+
+        assertThatThrownBy(() -> menuService.grantMenusToRole(
+                "r_admin", List.of("m01", "m20"), "op-1", "admin"))
+                .isInstanceOf(BusinessException.class)
+                .extracting(ex -> ((BusinessException) ex).resultCode())
+                .isEqualTo(ResultCode.FORBIDDEN);
+
+        verify(menuMapper, never()).deleteRoleMenusByRoleId(anyString());
+        verify(menuMapper, never()).insertRoleMenus(anyList());
+    }
+
+    @Test
+    @DisplayName("grantMenusToRole_顶级管理员授权不受自身菜单限制")
+    void grantMenusToRole_topLevelCanGrantAnyMenu() {
+        when(menuMapper.selectRoleById("r_admin")).thenReturn(role("r_admin", 10));
+        when(menuMapper.selectUserMinRoleLevel("op-0")).thenReturn(0);
+        when(menuMapper.selectAllMenus()).thenReturn(List.of(menu("m01", "0"), menu("m20", "0")));
+        when(menuMapper.insertRoleMenus(anyList())).thenReturn(1);
+
+        int count = menuService.grantMenusToRole("r_admin", List.of("m20"), "op-0", "admin");
+
+        assertThat(count).isEqualTo(1);
+        verify(menuMapper, never()).selectMenusByUserId(anyString());
     }
 
     /* ---------- 用户-角色授权 ---------- */

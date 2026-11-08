@@ -31,6 +31,13 @@ import java.util.concurrent.ConcurrentHashMap;
 @Component
 public class ChatSessionRegistry {
 
+    /**
+     * 单用户连接上限。多标签页/多设备是正常需求，但没有上限时一个账号就能把
+     * JVM 堆和推送遍历成本无限拉高：ticket 只要求登录、可无限签发，
+     * 连接建立时还会各跑一次未读聚合查询。
+     */
+    public static final int MAX_SESSIONS_PER_USER = 8;
+
     /** userId → 该用户的所有在线连接 */
     private final Map<String, Set<WebSocketSession>> sessionsByUser = new ConcurrentHashMap<>();
 
@@ -84,6 +91,30 @@ public class ChatSessionRegistry {
     public int countSessions(String userId) {
         Set<WebSocketSession> sessions = sessionsByUser.get(userId);
         return sessions == null ? 0 : sessions.size();
+    }
+
+    /**
+     * 关闭并移除某个用户的<b>全部</b>连接。
+     *
+     * <p>用于「会话被整体吊销」的场景（改密、管理员重置密码、禁用、删号）：
+     * WS 只在握手时鉴权一次，之后不复查 Token/账号状态；不显式关闭的话，
+     * 已登出的连接仍会持续收到含最新消息正文的未读推送，等于吊销只对 HTTP 生效。</p>
+     *
+     * @return 实际关闭的连接数
+     */
+    public int closeUser(String userId) {
+        if (userId == null || userId.isBlank()) {
+            return 0;
+        }
+        Set<WebSocketSession> sessions = sessionsByUser.remove(userId);
+        if (sessions == null || sessions.isEmpty()) {
+            return 0;
+        }
+        for (WebSocketSession session : sessions) {
+            closeQuietly(session);
+        }
+        log.info("已关闭用户全部 WebSocket 连接 userId={} 连接数={}", userId, sessions.size());
+        return sessions.size();
     }
 
     /**

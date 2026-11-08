@@ -116,7 +116,8 @@ public class MenuController {
     public ResponseEntity<Result<Integer>> grantRoleMenus(
             @PathVariable String roleId,
             @Valid @NotNull(message = "菜单ID列表不能为 null") @RequestBody List<String> menuIds) {
-        int count = menuService.grantMenusToRole(roleId, menuIds, AuthContext.currentUsername());
+        int count = menuService.grantMenusToRole(roleId, menuIds,
+                AuthContext.currentUserId(), AuthContext.currentUsername());
         return ResponseEntity.ok(Result.success(count));
     }
 }

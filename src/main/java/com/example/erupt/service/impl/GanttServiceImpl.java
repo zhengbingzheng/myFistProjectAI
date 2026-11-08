@@ -2,6 +2,7 @@ package com.example.erupt.service.impl;
 
 import com.example.erupt.common.AuthContext;
 import com.example.erupt.common.BusinessException;
+import com.example.erupt.common.LikeEscape;
 import com.example.erupt.common.Result;
 import com.example.erupt.common.ResultCode;
 import com.example.erupt.model.dto.GanttDependencyRequest;
@@ -84,9 +85,11 @@ public class GanttServiceImpl implements GanttService {
     @Override
     @Transactional(readOnly = true)
     public List<GanttPlanVO> listPlans(String keyword) {
-        // 非超管只查自己创建的；超管拿到 null，SQL 里不加 create_by 条件
+        // 非超管只查自己创建的；超管拿到 null，SQL 里不加 create_by 条件。
+        // 关键词必须转义：未转义的 % / _ 会被 LIKE 当通配符，用户搜 "%" 就变成全表匹配
         String scope = dataScope.dataScopeOwnerId();
-        return ganttMapper.selectPlans(normalize(keyword), scope).stream().map(this::toPlanVO).toList();
+        return ganttMapper.selectPlans(LikeEscape.escape(normalize(keyword)), scope).stream()
+                .map(this::toPlanVO).toList();
     }
 
     @Override
@@ -472,6 +475,9 @@ public class GanttServiceImpl implements GanttService {
         int deps = 0;
         for (GanttDependency d : ganttMapper.selectDeletedDependenciesByPlan(id)) {
             if (ganttMapper.selectDependencyByPair(d.getFromTaskId(), d.getToTaskId()) == null) {
+                // 恢复同样要验环：先删 A→B、再建 B→C、最后恢复 A→B，
+                // 新增入口的成环校验根本看不到这条被恢复的边
+                requireNoCycle(d.getPlanId(), d.getFromTaskId(), d.getToTaskId());
                 ganttMapper.restoreDependency(d.getId(), uid);
                 deps++;
             }
@@ -510,6 +516,8 @@ public class GanttServiceImpl implements GanttService {
                 GanttTask to = ganttMapper.selectTaskById(d.getToTaskId());
                 if (from == null || to == null) continue;
                 if (ganttMapper.selectDependencyByPair(d.getFromTaskId(), d.getToTaskId()) != null) continue;
+                // 与 restorePlan 同理：恢复出来的边也必须过成环校验
+                requireNoCycle(d.getPlanId(), d.getFromTaskId(), d.getToTaskId());
                 ganttMapper.restoreDependency(d.getId(), uid);
                 deps++;
             }
@@ -538,6 +546,8 @@ public class GanttServiceImpl implements GanttService {
         if (ganttMapper.selectDependencyByPair(dep.getFromTaskId(), dep.getToTaskId()) != null) {
             throw new BusinessException(ResultCode.CONFLICT, "同一对任务已存在依赖，无需恢复");
         }
+        // 「删依赖 → 建新边 → 恢复依赖」可以绕过新增入口的成环校验，恢复前必须重新验一次
+        requireNoCycle(dep.getPlanId(), dep.getFromTaskId(), dep.getToTaskId());
         ganttMapper.restoreDependency(id, AuthContext.currentUserId());
         return Result.success(new GanttRestoreVO(0, 1), "依赖已恢复");
     }

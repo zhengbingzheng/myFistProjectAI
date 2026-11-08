@@ -14,7 +14,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
-import org.springframework.web.servlet.HandlerInterceptor;
+import org.springframework.web.servlet.AsyncHandlerInterceptor;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Optional;
@@ -37,7 +37,7 @@ import java.util.Optional;
 @Slf4j
 @Component
 @RequiredArgsConstructor
-public class AuthInterceptor implements HandlerInterceptor {
+public class AuthInterceptor implements AsyncHandlerInterceptor {
 
     private static final String BEARER_PREFIX = "Bearer ";
 
@@ -60,6 +60,9 @@ public class AuthInterceptor implements HandlerInterceptor {
     public boolean preHandle(HttpServletRequest request,
                              HttpServletResponse response,
                              Object handler) throws Exception {
+        // 进入请求先清一次：异步请求的 afterCompletion 不会在本次 dispatch 被调用，
+        // 上一个请求（尤其 SSE/Callable/StreamingResponseBody）残留的身份必须先抹掉
+        AuthContext.clear();
         RequestScopeCache.clear();
         if (!properties.isEnabled()) {
             return true;
@@ -101,6 +104,19 @@ public class AuthInterceptor implements HandlerInterceptor {
                                 Object handler,
                                 Exception ex) {
         // 无论正常返回还是抛异常都要清理，避免线程复用导致身份串号
+        AuthContext.clear();
+        RequestScopeCache.clear();
+    }
+
+    /**
+     * 异步请求（SSE / Callable / StreamingResponseBody）开始时会走这里，
+     * 而不是 {@link #afterCompletion}。不清理的话，容器线程上的身份会留到下一个请求——
+     * 白名单端点（登录等）不覆盖 AuthContext，审计日志就会把登录操作记在上一个用户名下。
+     */
+    @Override
+    public void afterConcurrentHandlingStarted(HttpServletRequest request,
+                                               HttpServletResponse response,
+                                               Object handler) {
         AuthContext.clear();
         RequestScopeCache.clear();
     }

@@ -52,6 +52,9 @@ public class ChatServiceImpl implements ChatService {
     private static final int TYPE_FILE = 3;
     private static final int CONV_SINGLE = 1;
 
+    /** 深分页上限：与用户 / 附件 / 表浏览模块保持同一阈值 */
+    private static final long MAX_OFFSET = 100_000L;
+
     /** 同上：不依赖容器注入 ObjectMapper */
     private static final ObjectMapper OBJECT_MAPPER = JsonSupport.MAPPER;
 
@@ -144,11 +147,16 @@ public class ChatServiceImpl implements ChatService {
         requireMember(userId, conversationId);
         int safePage = Math.max(page, 1);
         int safeSize = Math.min(Math.max(pageSize, 1), 100);
+        long offset = (long) (safePage - 1) * safeSize;
+        // 与用户/附件/表浏览模块同一条深分页防线：LIMIT 的超大 OFFSET 要扫过并丢弃前面的行，
+        // page 由调用方随意给，不加上限等于把一条任意放大查询成本的入口开放给所有登录用户
+        if (offset > MAX_OFFSET) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "分页偏移量过大，请缩小页码");
+        }
         long total = chatMapper.countMessages(conversationId);
         if (total == 0) {
             return PageResult.of(List.of(), 0L, safePage, safeSize);
         }
-        long offset = (long) (safePage - 1) * safeSize;
         // SQL 按时间倒序取当前页，这里反转成正序（最早的在前），符合聊天窗口的阅读习惯
         List<Map<String, Object>> rows = chatMapper.selectMessages(conversationId, offset, safeSize);
         List<MessageVO> items = new ArrayList<>(rows.size());

@@ -1091,6 +1091,33 @@ class AttachmentServiceImplTest {
         assertThat(affected).isEqualTo(1);
     }
 
+    @Test
+    @DisplayName("upload_扩展名含非法字符_退化为无扩展名落盘")
+    void upload_illegalExtension_dropped() {
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "report.<script>", "text/plain", CONTENT);
+
+        AttachmentVO vo = attachmentService.upload(file);
+
+        assertThat(vo.fileExt()).isEmpty();
+        ArgumentCaptor<Attachment> captor = ArgumentCaptor.forClass(Attachment.class);
+        verify(attachmentMapper).insert(captor.capture());
+        // 扩展名会拼进落盘路径，尖括号等字符不能带进去
+        assertThat(captor.getValue().getStoragePath())
+                .doesNotContain("<").doesNotContain(">");
+    }
+
+    @Test
+    @DisplayName("ZIP 条目名在消费点再次净化_阻断路径分隔符与控制字符")
+    void zipEntryName_sanitizedAtConsumer() {
+        assertThat(AttachmentServiceImpl.safeZipEntryName("../etc/passwd"))
+                .isEqualTo(".._etc_passwd");
+        assertThat(AttachmentServiceImpl.safeZipEntryName("a\\b\nc.txt"))
+                .isEqualTo("a_b_c.txt");
+        assertThat(AttachmentServiceImpl.safeZipEntryName("..")).isEqualTo("unnamed");
+        assertThat(AttachmentServiceImpl.safeZipEntryName(null)).isEqualTo("unnamed");
+    }
+
     /** 构造一条附件记录，并在磁盘上放好对应的真实文件。 */
     private Attachment mockAttachment(String id, String originalName, long fileSize) throws IOException {
         Attachment attachment = mockAttachmentWithoutFile(id, originalName, fileSize);

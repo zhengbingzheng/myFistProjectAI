@@ -195,7 +195,9 @@ public class AttachmentServiceImpl implements AttachmentService {
             persisted = true;
             log.info("附件上传成功，id={}, name={}, size={}, type={}", id, originalName, size, entity.getFileType());
         } catch (IOException | NoSuchAlgorithmException e) {
-            throw new BusinessException(ResultCode.INTERNAL_ERROR, "附件保存失败：" + e.getMessage());
+            // 异常原文可能是 FileSystemException（含服务器绝对路径/落盘文件名），只进日志
+            log.warn("附件保存失败 id={} name={} 原因={}", id, originalName, e.getMessage());
+            throw new BusinessException(ResultCode.INTERNAL_ERROR, "附件保存失败，请联系管理员");
         } finally {
             // 入库失败时回滚是这样不够的——文件已经落盘了，必须显式清理，否则会留下孤儿文件
             if (!persisted) {
@@ -303,7 +305,9 @@ public class AttachmentServiceImpl implements AttachmentService {
                 log.debug("客户端中断了附件传输：{}", e.getMessage());
                 return false;
             }
-            throw new BusinessException(ResultCode.INTERNAL_ERROR, "附件读取失败：" + e.getMessage());
+            // 异常原文包含绝对路径，回显给调用方没有意义且泄露部署结构
+            log.warn("附件读取失败 path={} 原因={}", path, e.getMessage());
+            throw new BusinessException(ResultCode.INTERNAL_ERROR, "附件读取失败，请联系管理员");
         }
     }
 
@@ -382,7 +386,8 @@ public class AttachmentServiceImpl implements AttachmentService {
                 return;
             }
             // 打包中途出错时前端拿到的会是残缺的 ZIP，只能提示重传/重试
-            throw new BusinessException(ResultCode.INTERNAL_ERROR, "附件打包失败：" + e.getMessage());
+            log.warn("附件打包失败 原因={}", e.getMessage());
+            throw new BusinessException(ResultCode.INTERNAL_ERROR, "附件打包失败，请重试");
         }
     }
 
@@ -487,7 +492,10 @@ public class AttachmentServiceImpl implements AttachmentService {
             return "";
         }
         String ext = filename.substring(dot + 1).toLowerCase(Locale.ROOT);
-        return ext.length() > 16 ? "" : ext;
+        // 扩展名会拼进落盘路径与 ZIP 条目名，只接受小写字母数字。
+        // 旧实现只限长度，`report.<script>` 这类文件名会把尖括号带进路径；
+        // 与聊天附件模块的 [a-z0-9]{1,16} 保持同一规则。
+        return ext.matches("[a-z0-9]{1,16}") ? ext : "";
     }
 
     /** 相对存储根目录的路径：年月目录 + 主键 + 扩展名。 */
@@ -539,7 +547,10 @@ public class AttachmentServiceImpl implements AttachmentService {
 
     /** ZIP 内不允许同名条目，重复时追加序号。 */
     private String uniqueEntryName(String originalName, Set<String> usedEntryNames) {
-        String base = (originalName == null || originalName.isBlank()) ? "unnamed" : originalName;
+        // 消费点再净化一次：上传侧 safeOriginalName 已经剥离路径，但 ZIP 条目名直接来自库里的
+        // original_name，任何未来新增的写入路径（导入、修数）都可能绕过上传校验。
+        // 防 Zip Slip 的边界应该放在"拼条目名"这一处，而不是依赖上游单点。
+        String base = safeZipEntryName(originalName);
         String name = base;
         int seq = 1;
         while (!usedEntryNames.add(name)) {
@@ -547,6 +558,18 @@ public class AttachmentServiceImpl implements AttachmentService {
             name = dot > 0 ? base.substring(0, dot) + "(" + seq + ")" + base.substring(dot)
                     : base + "(" + seq + ")";
             seq++;
+        }
+        return name;
+    }
+
+    /** 条目名净化：去掉目录分隔符、控制字符与 "." / ".."，避免解压端把条目当路径处理。 */
+    static String safeZipEntryName(String originalName) {
+        String name = originalName == null ? "" : originalName;
+        name = name.replace('/', '_').replace('\\', '_')
+                .replaceAll("[\\u0000-\\u001f\\u007f]", "_")
+                .trim();
+        if (name.isEmpty() || ".".equals(name) || "..".equals(name)) {
+            return "unnamed";
         }
         return name;
     }

@@ -19,6 +19,7 @@ import com.example.erupt.repository.mapper.UserMapper;
 import com.example.erupt.service.MenuService;
 import com.example.erupt.service.TokenService;
 import com.example.erupt.service.UserService;
+import com.example.erupt.websocket.ChatSessionRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.mapstruct.factory.Mappers;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -52,14 +53,22 @@ public class UserServiceImpl implements UserService {
     /** 改密后需要吊销该用户的全部登录会话，这里直接依赖 TokenService。 */
     private final TokenService tokenService;
 
+    /**
+     * 会话被整体吊销时，已建立的 WebSocket 连接也要关闭：WS 只在握手时鉴权一次，
+     * 不关的话账号被禁用/改密后，旧连接仍会收到含消息正文的推送。
+     */
+    private final ChatSessionRegistry chatSessionRegistry;
+
     /** 密码只存 BCrypt 哈希，不存明文；复用 SecurityConfig 暴露的 PasswordEncoder bean，避免多实例。 */
     private final PasswordEncoder passwordEncoder;
 
     public UserServiceImpl(UserMapper userMapper, MenuService menuService,
-                           TokenService tokenService, PasswordEncoder passwordEncoder) {
+                           TokenService tokenService, ChatSessionRegistry chatSessionRegistry,
+                           PasswordEncoder passwordEncoder) {
         this.userMapper = userMapper;
         this.menuService = menuService;
         this.tokenService = tokenService;
+        this.chatSessionRegistry = chatSessionRegistry;
         this.passwordEncoder = passwordEncoder;
     }
 
@@ -130,6 +139,11 @@ public class UserServiceImpl implements UserService {
         patch.setUpdateBy(AuthContext.currentUsername());
         int affected = userMapper.updateById(patch);
         if (affected >= 1) {
+            // 禁用后除了拦下一次 HTTP，还必须断掉已建立的 WebSocket：
+            // 否则被禁用的账号仍能继续收到聊天/通知推送
+            if (patch.getStatus() != null && patch.getStatus() == 0) {
+                chatSessionRegistry.closeUser(id);
+            }
             log.info("更新用户成功，id={}, affected={}", id, affected);
             return Result.success(null, "更新成功");
         }
@@ -179,6 +193,7 @@ public class UserServiceImpl implements UserService {
         if (affected >= 1) {
             // 删除后立即吊销该用户全部会话：账号都没了，Token 不能再活到 TTL
             tokenService.revokeAllForUser(id);
+            chatSessionRegistry.closeUser(id);
             log.info("软删除用户成功，id={}, affected={}", id, affected);
             return Result.success(null, "删除成功");
         }
@@ -241,6 +256,7 @@ public class UserServiceImpl implements UserService {
             // 已经登录的其它设备（包括被盗 Token 的攻击者）还能继续用到 Token 自然过期。
             // 当前这次请求的 Token 也在其中——前端收到成功后应重新登录，这是预期行为。
             tokenService.revokeAllForUser(id);
+            chatSessionRegistry.closeUser(id);
             log.info("用户自助修改密码成功，id={}", id);
             return Result.success(null, "密码修改成功，请重新登录");
         }
@@ -261,6 +277,7 @@ public class UserServiceImpl implements UserService {
             // 与自助改密同理：管理员重置密码之后，目标用户手里所有旧 Token 必须立即失效。
             // 少了这一步，"密码已重置"只是让下次登录取新密码，被盗会话仍可用到自然过期。
             tokenService.revokeAllForUser(id);
+            chatSessionRegistry.closeUser(id);
             // 记录操作人：重置他人密码是高敏操作，事后必须能追溯到具体账号
             log.info("管理员重置用户密码成功，userId={}, operator={}", id, AuthContext.currentUsername());
             return Result.success(null, "密码重置成功");

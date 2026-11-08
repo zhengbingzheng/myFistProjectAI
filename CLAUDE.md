@@ -53,7 +53,7 @@ mysql -uroot -p < src/main/resources/db/init-im-menu.sql     # 角色与菜单�
 
 - **鉴权**：没有 Spring Security 过滤器链（只引入了 `spring-security-crypto` 做 BCrypt）。`AuthInterceptor` 拦 `/api/**`，凭证为 `Authorization: Bearer <token>`；401 同时体现在 HTTP 状态码和响应体 `code`。匿名路径在 `AuthProperties.permitPaths`，`isPermit` 只放行精确路径或"前缀 + `/`"，新增匿名端点必须显式加进去。
 - **身份**：`AuthContext` 是 ThreadLocal，`AuthInterceptor.afterCompletion` 负责清理；任何绕过拦截器写身份的地方都要配套 `clear()`。
-- **Token**：`TokenService` 自实现 HMAC-SHA256 签名 + Redis 会话（可吊销）。Redis 不可用时降级为"只验签名与有效期"。
+- **Token**：`TokenService` 自实现 HMAC-SHA256 签名 + Redis 会话（可吊销）。Redis 不可用时降级为"只验签名与有效期"。未显式配置 `AUTH_TOKEN_SECRET` 时，local/dev 档由 `AuthSecretGuard` 生成**进程内随机密钥**（不再沿用随代码分发的公开默认值）；多实例部署/重启后需保留旧 Token 的场景必须显式注入密钥。
 - **缓存**：`RedisCacheService` 是唯一的 Redis 访问入口，设计原则是**缓存失效绝不能影响业务**——开关短路、异常降级回源、连续失败熔断 30 秒。key 一律走 `CacheKeys`（动态片段做 SHA-256 摘要）。注意 `NavigationServiceImpl` 目前**不用缓存**（注释解释了原因），`CacheKeys`/`app.cache.redis.navigation.*` 是为其保留的。
 - **软删除 + 唯一约束**：用 MySQL 生成列（`t_user.username_active`、`t_dict.dict_type_active`）让唯一索引只作用于未删除行；软删除后同编码可重建。新增类似表沿用此模式。
 - **主键**：字符串，32 位 UUID 去横线，应用层生成；`db/migrate_id_to_varchar32.sql` 是历史迁移脚本。
@@ -71,7 +71,7 @@ Spring Boot 4.1.1 管理 Jackson 3，包名是 `tools.jackson.*`，且 API 有�
 ## WebSocket（即时通信）
 
 - 原生 `TextWebSocketHandler`，未用 STOMP。端点 `/ws/chat`，来源白名单 `app.ws.allowed-origins`（不能是 `*`）。
-- 握手即鉴权，凭证走 URL 参数：优先一次性 `ticket`（`TokenService` 的 `ws:ticket:`，60 秒 TTL），退回 `token`/`access_token` 兼容旧前端。浏览器 WS 不能加请求头，所以 token 会进访问日志——这是采用短 TTL 的原因。
+- 握手即鉴权，凭证走 URL 参数：只接受一次性 `ticket`（`TokenService` 的 `ws:ticket:`，60 秒 TTL），不再接受长期 `token`/`access_token`。浏览器 WS 不能加请求头，所以长期凭证会进访问日志——这是改成短 TTL 一次性 ticket 的原因。
 - `ChatSessionRegistry` 维护 userId → 多连接的**内存** Map（多标签页/多设备都要收到）。多实例部署时替换为 Redis Pub/Sub 转发，上层不用改。
 - 推送必须在 `TransactionSynchronization.afterCommit` 之后，否则对端会"收到提醒但拉不到消息"。
 

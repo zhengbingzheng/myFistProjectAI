@@ -51,6 +51,10 @@ class UserServiceImplTest {
     @Mock
     private com.example.erupt.service.TokenService tokenService;
 
+    /** 会话被整体吊销时同步关闭该用户的 WebSocket 连接 */
+    @Mock
+    private com.example.erupt.websocket.ChatSessionRegistry chatSessionRegistry;
+
     @InjectMocks
     private UserServiceImpl userService;
 

@@ -121,7 +121,9 @@ public class SearchServiceImpl implements SearchService {
             return null;
         }
         String flattened = raw.replaceAll("\\s+", " ").trim();
-        if (flattened.isEmpty() || title.toLowerCase().contains(flattened.toLowerCase())) {
+        // title 可能为 null（历史脏数据/某些表只有正文），直接 toLowerCase 会 500
+        if (flattened.isEmpty()
+                || (title != null && title.toLowerCase().contains(flattened.toLowerCase()))) {
             return null;
         }
         return flattened.length() > 120 ? flattened.substring(0, 120) + "…" : flattened;
