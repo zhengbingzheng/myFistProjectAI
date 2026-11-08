@@ -169,6 +169,7 @@ public class AgentDataServiceImpl implements AgentDataService {
                 2. 只允许 SELECT；计数用 COUNT(*)，模糊匹配用 LIKE '%%关键词%%'；
                 3. 只使用表结构里存在的表和列；「有效数据」通常用 del_flag='0' 过滤（如果该表有此列）；
                 4. 时间条件用 DATE() / NOW() 处理；默认排序按 create_time DESC 取最近。
+                5. 只能查询以t_开头的数据库表；
 
                 表结构：
                 %s
